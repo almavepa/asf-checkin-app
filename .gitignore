@@ -210,3 +210,4 @@ __marimo__/
 *.csv
 
 credentials.json
+*.iss

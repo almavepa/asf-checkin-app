@@ -20,7 +20,7 @@ from version import __version__
 from config import load_token, prompt_and_store_token
 
 OWNER = "almavepa"
-REPO  = "checkin-system"
+REPO  = "asf-checkin-app"
 GITHUB_LATEST = f"https://api.github.com/repos/{OWNER}/{REPO}/releases/latest"
 INSTALLER_PATTERN = r"CheckinSetup-v\d+\.\d+\.\d+\.exe"
 TIMEOUT = 12
