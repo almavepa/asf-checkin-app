@@ -10,7 +10,7 @@ from pathlib import Path
 
 # ---- CONFIG ----
 OWNER = "almavepa"
-REPO  = "checkin-system"
+REPO  = "asf-checkin-app"
 ICON = str((Path(__file__).parent / "checkin.ico").resolve())
 OUTDIR = Path("dist")
 ISS_PATH = Path("installer.iss")

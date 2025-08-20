@@ -7,7 +7,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 
 APP_VENDOR = "ASFormacao"
-APP_NAME = "Checkin"
+APP_NAME = "asf-checkin-app"
 DATA_DIR = Path(os.getenv("APPDATA", Path.home())) / APP_VENDOR / APP_NAME
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
