@@ -1,5 +1,5 @@
 # main.py
-# - Silently checks GitHub private release for updates on start
+# - Silently checks GitHub private release for updates on start (apenas no .exe)
 # - Prompts for token on first run (encrypted save in %APPDATA%\ASFormacao\Checkin)
 # - Ensures first-run seed files (settings.json, students.py, data/email.html, data/fundo.jpg)
 # - Launches your Tk UI in Interface.py
@@ -173,12 +173,21 @@ def _fetch_latest(token: str):
     return tag, inst_url, sha_url
 
 def _maybe_update_silent():
-    # Token: load or prompt once (silent otherwise)
+    """
+    Só faz handoff para o updater quando estiver empacotado (.exe).
+    Ao correr do código-fonte (não-frozen), nunca sai da app por causa de updates.
+    Também respeita a env var CHECKIN_SKIP_UPDATE=1 para saltar a verificação.
+    """
+    if not getattr(sys, "frozen", False):
+        return  # a correr do source → não tenta atualizar silenciosamente
+
+    if os.getenv("CHECKIN_SKIP_UPDATE") == "1":
+        return
+
     token = load_token()
     if not token:
         token = prompt_and_store_token()
         if not token:
-            # No token → skip update check, still run the app
             return
     try:
         remote_ver, inst_url, sha_url = _fetch_latest(token)
@@ -199,11 +208,9 @@ def _maybe_update_silent():
             env = os.environ.copy()
             env["GITHUB_TOKEN"] = token
             cmd = [sys.executable] + args if upd.suffix.lower() == ".py" else args
-            # Silent handoff: spawn updater and exit. Updater waits for us to close.
             subprocess.Popen(cmd, cwd=base, env=env)
             sys.exit(0)
     except Exception as e:
-        # Fail safe: never block app if update check fails
         print(f"[update] Check failed: {e}")
 
 def _run_ui():
@@ -217,7 +224,7 @@ def _run_ui():
 if __name__ == "__main__":
     # 1) Garantir ficheiros mínimos por utilizador (evita int(None))
     _ensure_first_run_files()
-    # 2) Check updates em silêncio (não bloqueia)
+    # 2) Check updates em silêncio (não bloqueia; só handoff no .exe)
     _maybe_update_silent()
     # 3) Arrancar UI
     _run_ui()

@@ -1,129 +1,200 @@
-# gerar_qr.py
-import os
-import re
+# generate_qr.py — robusto contra settings ausentes/caminhos errados
+from __future__ import annotations
+import os, sys, json, re, base64, smtplib, mimetypes
+from pathlib import Path
+from typing import Any, Dict, Tuple, Optional
+from email.message import EmailMessage
+
 import qrcode
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email.mime.text import MIMEText
-from email import encoders
-from dotenv import load_dotenv
-from paths import get_paths 
+from qrcode.constants import ERROR_CORRECT_M
 
+# -------------------- Defaults seguros --------------------
+DEFAULTS: Dict[str, Any] = {
+    "qr_box_size": 10,
+    "qr_border": 4,
+    "email_sender_name": "ASFormação",
+    "school_name": "ASFormação",
+    "min_seconds_between_reads": 5,
+    "google_sheet_id": "",
+    "sheet_name": "Sheet1",
+    "smtp_host": "",
+    "smtp_port": 587,
+    "smtp_user": "",
+    "smtp_password": "",
+    "from_email": "",
+    "notify_guardians": False,
+}
 
-# --- Dados dos alunos ---
-# Espera-se um ficheiro students.py com um dicionário:
-# students = { "1001": ["Maria Silva", "maria@ex.com", "maria2@ex.com"] }
-from students import students
+# -------------------- Helpers de paths --------------------
+def _user_appdata_dir() -> Path:
+    base = os.getenv("APPDATA")
+    if not base:
+        base = str(Path.home() / "AppData" / "Roaming")
+    return Path(base) / "ASFormacao" / "Checkin"
 
-# =========================
-#   CONFIGURAÇÃO DE EMAIL
-# =========================
-# --- Carregar variáveis do .env ---
-load_dotenv()
+def _exe_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
 
-SMTP_SERVER = os.getenv("SMTP_SERVER")
-SMTP_PORT = int(os.getenv("SMTP_PORT"))
-SMTP_USER = os.getenv("SMTP_USER")
-SMTP_PASS = os.getenv("SMTP_PASS")
-DESTINATARIO_FIXO = "alice@asformacao.com"   # <- email para onde vais enviar
-ENVIAR_EMAIL = True                         # põe False se quiseres só gerar os QR sem enviar
-APP_DIR, DATA_DIR = get_paths()
-# Pasta de saída dos QR
+def _cwd_dir() -> Path:
+    # interface.py faz os.chdir(DATA_DIR) no arranque
+    try:
+        return Path.cwd()
+    except Exception:
+        return _exe_dir()
 
-PASTA_QR = os.path.join(DATA_DIR, "qrcodes")
-os.makedirs(PASTA_QR, exist_ok=True)
+def _settings_candidates() -> list[Path]:
+    return [
+        _user_appdata_dir() / "settings.json",
+        _exe_dir() / "settings.json",
+        _cwd_dir() / "settings.json",
+    ]
 
-import os
-from generate_qr import PASTA_QR
-print("QRs go to:", os.path.abspath(PASTA_QR))
+# -------------------- Load settings com merges/fallback --------------------
+def _load_settings() -> Tuple[Dict[str, Any], Optional[Path]]:
+    for p in _settings_candidates():
+        try:
+            if p.exists():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    # merge sem sobrepor se valor vier None
+                    merged = {**DEFAULTS, **{k: v for k, v in data.items() if v is not None}}
+                    return merged, p
+        except Exception:
+            pass
+    return DEFAULTS.copy(), None
 
-# =========================
-#     FUNÇÕES AUXILIARES
-# =========================
-def _sanitize_filename(texto: str) -> str:
-    # troca espaços por "_" e remove caracteres problemáticos
-    texto = texto.strip().replace(" ", "_")
-    return re.sub(r"[^A-Za-z0-9_\-\.]", "", texto)
+def _safe_int(cfg: Dict[str, Any], key: str, default: int) -> int:
+    v = cfg.get(key, default)
+    try:
+        if v in ("", None):
+            return default
+        return int(v)
+    except Exception:
+        return default
+
+# -------------------- QR core --------------------
+def _qr_params() -> Tuple[int, int, Optional[Path], Dict[str, Any]]:
+    cfg, src = _load_settings()
+    box = max(1, min(40, _safe_int(cfg, "qr_box_size", DEFAULTS["qr_box_size"])))
+    border = max(1, min(10, _safe_int(cfg, "qr_border", DEFAULTS["qr_border"])))
+    return box, border, src, cfg
+
+def _sanitize_filename(s: str) -> str:
+    s = re.sub(r"\s+", "_", s.strip())
+    s = re.sub(r"[^A-Za-z0-9_\-]", "", s)
+    return s or "qr"
+
+def _ensure_dirs() -> Tuple[Path, Path]:
+    # DATA_DIR é o CWD por causa do interface.py
+    data_dir = _cwd_dir()
+    qrcodes = data_dir / "qrcodes"
+    qrcodes.mkdir(parents=True, exist_ok=True)
+    return data_dir, qrcodes
 
 def gerar_qr_para_id(student_id: str, nome: str) -> str:
-    """Gera o QR para um aluno e devolve o caminho do ficheiro PNG."""
-    os.makedirs(PASTA_QR, exist_ok=True)
-    conteudo_qr = student_id  # só o ID
-    img = qrcode.make(conteudo_qr)
-    filename = f"{PASTA_QR}/{_sanitize_filename(student_id)}_{_sanitize_filename(nome)}.png"
-    img.save(filename)
-    return filename
+    """
+    Gera um QR (conteúdo: 'ASF{student_id}') e devolve o caminho do PNG criado.
+    Usa box_size/border a partir do settings.json (com defaults seguros).
+    """
+    box, border, src, cfg = _qr_params()
+    content = f"ASF{student_id}"
 
-def enviar_qr_por_email(caminho_qr: str, nome_aluno: str) -> None:
-    """Envia o ficheiro de QR em anexo para o destinatário fixo."""
-    if not os.path.exists(caminho_qr):
-        raise FileNotFoundError(f"Ficheiro não encontrado: {caminho_qr}")
-
-    msg = MIMEMultipart()
-    msg["From"] = SMTP_USER
-    msg["To"] = DESTINATARIO_FIXO
-    msg["Subject"] = f"Código QR de {nome_aluno}"
-
-    corpo = (
-        f"Olá,\n\n"
-        f"Segue em anexo o código QR do(a) aluno(a) {nome_aluno}.\n\n"
-        f"Cumps."
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=ERROR_CORRECT_M,
+        box_size=box,
+        border=border,
     )
-    msg.attach(MIMEText(corpo, "plain"))
+    qr.add_data(content)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
 
-    with open(caminho_qr, "rb") as f:
-        parte = MIMEBase("application", "octet-stream")
-        parte.set_payload(f.read())
-        encoders.encode_base64(parte)
-        parte.add_header(
-            "Content-Disposition",
-            f'attachment; filename="{os.path.basename(caminho_qr)}"'
-        )
-        msg.attach(parte)
+    data_dir, qrcodes_dir = _ensure_dirs()
+    filename = f"QR_{_sanitize_filename(student_id)}_{_sanitize_filename(nome)}.png"
+    out_path = qrcodes_dir / filename
+    img.save(out_path)
+    return str(out_path)
 
-    with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=5) as server:
-        #server.starttls()
-        server.login(SMTP_USER, SMTP_PASS)
+# -------------------- Email (no-op se sem SMTP) --------------------
+def _send_email_with_attachment(
+    smtp_host: str, smtp_port: int, smtp_user: str, smtp_password: str,
+    sender_email: str, sender_name: str,
+    to_email: str, subject: str, html_body: str,
+    attachment_path: str
+) -> None:
+    msg = EmailMessage()
+    msg["From"] = f"{sender_name} <{sender_email}>" if sender_name else sender_email
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.set_content("Ver anexo em HTML.")
+    msg.add_alternative(html_body, subtype="html")
+
+    ctype, _ = mimetypes.guess_type(attachment_path)
+    maintype, subtype = (ctype or "application/octet-stream").split("/", 1)
+    with open(attachment_path, "rb") as f:
+        msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=Path(attachment_path).name)
+
+    with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as server:
+        server.starttls()
+        if smtp_user:
+            server.login(smtp_user, smtp_password or "")
         server.send_message(msg)
 
-def gerar_qr_para_todos(enviar_email: bool = ENVIAR_EMAIL):
-    os.makedirs(PASTA_QR, exist_ok=True)
-    print(f"[i] Pasta '{PASTA_QR}' pronta.")
+def enviar_qr_por_email(caminho_qr: str, nome: str, to_email: str | None = None) -> None:
+    """
+    Envia o QR por email, SE houver SMTP configurado.
+    - Se não houver SMTP ou 'from_email', faz no-op (não levanta exceção).
+    - 'to_email' é opcional: se não vier, tenta 'ALUNO_EMAIL' do ambiente (.env) ou no-op.
+    """
+    _, _, _, cfg = _qr_params()
 
+    smtp_host = (cfg.get("smtp_host") or "").strip()
+    smtp_port = _safe_int(cfg, "smtp_port", 587)
+    smtp_user = (cfg.get("smtp_user") or "").strip()
+    smtp_pass = (cfg.get("smtp_password") or "").strip()
+    sender    = (cfg.get("from_email") or "").strip()
+    sender_nm = (cfg.get("email_sender_name") or "ASFormação").strip()
+    school    = (cfg.get("school_name") or "ASFormação").strip()
 
+    # Sem SMTP configurado → no-op silencioso
+    if not smtp_host or not sender:
+        return
 
-    total = len(students)
-    ok_qr, ok_mail = 0, 0
+    # destinatário: parâmetro, variável de ambiente ou falha silenciosa
+    to = (to_email or os.getenv("ALUNO_EMAIL") or "").strip()
+    if not to:
+        return
 
-    for student_id, dados in students.items():
-        # suporta registos com 2 ou 3 campos
-        if len(dados) >= 1:
-            nome = dados[0]
-        else:
-            print(f"[!] ID {student_id} sem nome — a ignorar.")
-            continue
+    # corpo do email: tenta ler email.html (DATA_DIR ou APP_DIR), caso contrário usa um default simples
+    data_dir = _cwd_dir()
+    app_dir  = _exe_dir()
+    email_tpl_candidates = [
+        data_dir / "email.html",
+        app_dir / "email.html",
+    ]
+    html = None
+    for p in email_tpl_candidates:
+        if p.exists():
+            try:
+                html = p.read_text(encoding="utf-8")
+                break
+            except Exception:
+                pass
+    if html is None:
+        html = f"""<!doctype html><html><body>
+        <p>Olá {nome},</p>
+        <p>Segue em anexo o teu QR de acesso ({school}).</p>
+        </body></html>"""
 
-        try:
-            caminho = gerar_qr_para_id(student_id, nome)
-            ok_qr += 1
-            print(f"[✓] QR gerado para {nome} → {caminho}")
+    subject = f"{school} – QR de acesso"
 
-            if enviar_email:
-                try:
-                    enviar_qr_por_email(caminho, nome)
-                    ok_mail += 1
-                    print(f"[✉] Email enviado para {DESTINATARIO_FIXO} ({nome})")
-                except Exception as e:
-                    print(f"[!] Falha a enviar email ({nome}): {e}")
-
-        except Exception as e:
-            print(f"[!] Erro com {nome} (ID {student_id}): {e}")
-
-    print(f"\n--- Resumo ---\nAlunos: {total}\nQR gerados: {ok_qr}\nEmails enviados: {ok_mail if enviar_email else '— (desativado)'}")
-
-# =========================
-#       EXECUÇÃO
-# =========================
-if __name__ == "__main__":
-    gerar_qr_para_todos()
+    try:
+        _send_email_with_attachment(
+            smtp_host, smtp_port, smtp_user, smtp_pass,
+            sender, sender_nm, to, subject, html, caminho_qr
+        )
+    except Exception:
+        # não propaga falha de email (interface.py já lida com aviso)
+        pass
