@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 import shutil
 import time
+from string import Template
 
 import requests
 
@@ -75,6 +76,7 @@ def build_pyinstaller():
     run([
         "pyinstaller", "main.py",
         "--noconfirm", "--onefile", "--clean",
+        "--windowed",   
         "--name", "CheckinApp",
         "--icon", ICON,
         "--add-data", "email.html;.",
@@ -95,46 +97,47 @@ def build_pyinstaller():
 def write_iss():
     OUTDIR.mkdir(parents=True, exist_ok=True)
 
-    # cópia do ícone (evita locks no original se estiver aberto noutro programa)
-    temp_icon = OUTDIR / f"setup_icon_{VERSION}.ico"
-    shutil.copy2(ICON, temp_icon)
-    icon_win_path = str(temp_icon).replace("/", "\\")
+    abs_dist = str(OUTDIR.resolve()).replace("/", "\\")
+    app_exe  = str((OUTDIR / "CheckinApp.exe").resolve()).replace("/", "\\")
+    upd_exe  = str((OUTDIR / "updater_install.exe").resolve()).replace("/", "\\")
+    icon_win = str((Path(ICON).resolve())).replace("/", "\\")
 
-    # NOTA: mantemos OutputDir=dist e OutputBaseFilename=CheckinSetup-v{VERSION}
-    iss = f"""
-[Setup]
-AppName=Checkin System
-AppVersion={VERSION}
-DefaultDirName={{userappdata}}\\ASFormacao\\Checkin
-DefaultGroupName=ASFormacao\\Checkin
-OutputDir=dist
-OutputBaseFilename=CheckinSetup-v{VERSION}
-Compression=lzma2
-SolidCompression=yes
-DisableProgramGroupPage=yes
-SetupIconFile={icon_win_path}
+    iss_tpl = Template(r"""
+    [Setup]
+    AppName=Checkin System
+    AppVersion=$VERSION
+    DefaultDirName={userappdata}\ASFormacao\Checkin
+    DefaultGroupName=ASFormacao\Checkin
+    OutputDir=$OUTDIR
+    OutputBaseFilename=CheckinSetup-v$VERSION
+    Compression=lzma2
+    SolidCompression=yes
+    DisableProgramGroupPage=yes
+    PrivilegesRequired=lowest
+    PrivilegesRequiredOverridesAllowed=dialog
+    SetupLogging=yes
+    SetupIconFile=$ICON
 
-[Files]
-Source: "dist\\CheckinApp.exe"; DestDir: "{{{{app}}}}"; Flags: ignoreversion
-Source: "dist\\updater_install.exe"; DestDir: "{{{{app}}}}"; Flags: ignoreversion
+    [Files]
+    Source: "$APP_EXE"; DestDir: "{app}"; Flags: ignoreversion
+    Source: "$UPD_EXE"; DestDir: "{app}"; Flags: ignoreversion
 
-[Icons]
-Name: "{{{{group}}}}\\Checkin System"; Filename: "{{{{app}}}}\\CheckinApp.exe"
-Name: "{{{{commondesktop}}}}\\Checkin System"; Filename: "{{{{app}}}}\\CheckinApp.exe"
+    [Icons]
+    ; Start menu shortcut (per-user)
+    Name: "{group}\Checkin System"; Filename: "{app}\CheckinApp.exe"
+    ; Desktop shortcut **per-user** (NOT commondesktop)
+    Name: "{userdesktop}\Checkin System"; Filename: "{app}\CheckinApp.exe"
 
-[Run]
-Filename: "{{{{app}}}}\\CheckinApp.exe"; Flags: nowait postinstall skipifsilent
-""".strip() + "\n"
+    [Run]
+    Filename: "{app}\CheckinApp.exe"; Flags: nowait postinstall skipifsilent
+    """)
 
-    # Escrever para ficheiro temporário e fazer rename atómico para evitar locks
-    tmp_path = ISS_PATH.with_suffix(".iss.tmp")
-    tmp_path.write_text(iss, encoding="utf-8")
-    tmp_path.replace(ISS_PATH)  # move/rename atómico
 
-    # Esperar o desbloqueio do .iss (OneDrive/Defender podem agarrá-lo por instantes)
-    if not wait_until_unlocked(ISS_PATH, timeout=10.0, poll=0.2):
-        raise SystemExit(f"'{ISS_PATH}' está bloqueado por outro processo. Feche editores/OneDrive e tente novamente.")
-
+    iss_text = iss_tpl.substitute(
+        VERSION=VERSION, OUTDIR=abs_dist,
+        APP_EXE=app_exe, UPD_EXE=upd_exe, ICON=icon_win
+    )
+    ISS_PATH.write_text(iss_text, encoding="utf-8")
 
 def build_installer():
     iscc_cmd = ensure_iscc_on_path()

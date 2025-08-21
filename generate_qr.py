@@ -99,7 +99,7 @@ def gerar_qr_para_id(student_id: str, nome: str) -> str:
     Usa box_size/border a partir do settings.json (com defaults seguros).
     """
     box, border, src, cfg = _qr_params()
-    content = f"ASF{student_id}"
+    content = f"{student_id}"
 
     qr = qrcode.QRCode(
         version=None,
