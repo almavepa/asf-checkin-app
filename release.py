@@ -14,15 +14,15 @@ import requests
 OWNER = "almavepa"
 REPO  = "asf-checkin-app"
 ICON = str((Path(__file__).parent / "checkin.ico").resolve())
-OUTDIR = Path("dist")  # mantém a saída aqui, se preferires podes mudar
-TOKEN = os.getenv("GITHUB_TOKEN")  # defina no ambiente (recomendado)
+OUTDIR = Path("dist")  # output final do PyInstaller
+TOKEN = os.getenv("GITHUB_TOKEN")
 VERSION_FILE = Path("version.py")
 
-# Usar pasta temporária fora do OneDrive para o .iss
+# Pasta temporária fora do OneDrive para .iss
 LOCALAPPDATA = Path(os.getenv("LOCALAPPDATA", str(Path.home()))).resolve()
 SAFE_BUILD_DIR = LOCALAPPDATA / "ASFormacao" / "Checkin" / "build"
 SAFE_BUILD_DIR.mkdir(parents=True, exist_ok=True)
-ISS_PATH = SAFE_BUILD_DIR / f"installer_{os.getpid()}.iss"  # nome único por processo
+ISS_PATH = SAFE_BUILD_DIR / f"installer_{os.getpid()}.iss"
 
 
 # -------------------- UTIL --------------------
@@ -37,11 +37,10 @@ def ensure_iscc_on_path():
     except Exception:
         full_path = r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
         if not Path(full_path).exists():
-            raise SystemExit("Inno Setup `iscc` not found. Install Inno Setup 6 or update the path in release.py.")
+            raise SystemExit("Inno Setup `iscc` not found. Instala o Inno Setup 6 ou ajusta o caminho.")
         return full_path
 
 def wait_until_unlocked(path: Path, timeout=10.0, poll=0.2):
-    """Espera até o ficheiro estar livre (sem locks de AV/Indexação/OneDrive)."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -104,20 +103,18 @@ def git_push_with_tags():
 def build_pyinstaller():
     OUTDIR.mkdir(parents=True, exist_ok=True)
 
-    # Clean old build/cache
+    # limpar build/ e caches
     for folder in ["build", "__pycache__"]:
         p = Path(folder)
         if p.exists():
             shutil.rmtree(p, ignore_errors=True)
 
-    # Limpar ficheiros antigos em dist
+    # limpar dist antigo
     if OUTDIR.exists():
         for f in OUTDIR.iterdir():
             if f.is_file():
-                try:
-                    f.unlink()
-                except Exception:
-                    pass
+                try: f.unlink()
+                except: pass
 
     # Main app
     run([
@@ -132,7 +129,7 @@ def build_pyinstaller():
         "--hidden-import", "Interface"
     ])
 
-    # Updater
+    # Updater sempre incluído
     run([
         "pyinstaller", "updater_install.py",
         "--noconfirm", "--onefile", "--clean",
@@ -155,7 +152,7 @@ def write_iss(version: str, use_icon: bool, out_iss: Path):
 [Setup]
 AppName=Checkin System
 AppVersion=$VERSION
-; novo destino: %LOCALAPPDATA%\Programs (não requer admin)
+; instalar em %LOCALAPPDATA%\Programs (user-only, sem admin)
 DefaultDirName={localappdata}\Programs\ASFormacao\Checkin
 DefaultGroupName=ASFormacao\Checkin
 OutputDir=$OUTDIR
@@ -188,12 +185,9 @@ Filename: "{app}\CheckinApp.exe"; Flags: nowait postinstall skipifsilent
     out_iss.write_text(iss_text, encoding="utf-8")
 
 
-
 def build_installer(version: str) -> Path:
     iscc_cmd = ensure_iscc_on_path()
     installer_name = f"CheckinSetup-v{version}.exe"
-
-    # Delete old installer if present
     old_installer = OUTDIR / installer_name
     if old_installer.exists():
         try:
@@ -202,22 +196,17 @@ def build_installer(version: str) -> Path:
         except Exception as e:
             print(f"[!] Could not delete old installer: {e}")
 
-    # Preparar .iss temporário fora do OneDrive
     use_icon_first = True
-    attempts = 5
-    backoff = 1.0
-
+    attempts, backoff = 5, 1.0
     for attempt in range(1, attempts + 1):
         try:
             write_iss(version, use_icon_first, ISS_PATH)
             if not wait_until_unlocked(ISS_PATH, timeout=5.0):
-                print("[!] Aviso: .iss pode estar bloqueado; prosseguindo mesmo assim…")
+                print("[!] Aviso: .iss pode estar bloqueado; prosseguindo…")
             run([iscc_cmd, str(ISS_PATH)])
-            break  # sucesso
-        except subprocess.CalledProcessError as e:
-            msg = str(e)
+            break
+        except subprocess.CalledProcessError:
             print(f"[!] ISCC falhou (tentativa {attempt}/{attempts}).")
-            # Se a primeira tentativa com ícone falhar, tentar sem ícone
             if use_icon_first:
                 print("[i] A tentar novamente sem ícone…")
                 use_icon_first = False
@@ -227,51 +216,42 @@ def build_installer(version: str) -> Path:
                 continue
             raise
         finally:
-            # tentar remover o .iss temporário (ignorar erros)
             try:
                 if ISS_PATH.exists():
                     ISS_PATH.unlink()
-            except Exception:
-                pass
+            except: pass
 
-    # Verify installer was created
     out_path = OUTDIR / installer_name
     if not out_path.exists():
         raise SystemExit(f"[!] Installer not created in {OUTDIR}")
-    else:
-        print(f"[✔] Installer available at {out_path}")
+    print(f"[✔] Installer available at {out_path}")
     return out_path
 
 
 # -------------------- RELEASE --------------------
 def create_or_get_release_upload_url(version: str) -> str:
     if not TOKEN:
-        raise SystemExit("GITHUB_TOKEN not set in environment. Set it or store via your app's first-run prompt (this script needs it too).")
+        raise SystemExit("GITHUB_TOKEN not set in environment.")
     rel_api = f"https://api.github.com/repos/{OWNER}/{REPO}/releases"
     headers = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/vnd.github+json"}
-
     r = requests.post(rel_api, headers=headers, json={
         "tag_name": f"v{version}",
         "name": f"Checkin v{version}",
-        "draft": False,
-        "prerelease": False
+        "draft": False, "prerelease": False
     })
     if r.status_code == 201:
         print(f"[i] Created GitHub release v{version}")
         return r.json()["upload_url"].split("{")[0]
     if r.status_code == 422:
-        print(f"[i] Release v{version} may already exist. Trying to fetch it…")
+        print(f"[i] Release v{version} já existe, a procurar…")
         r2 = requests.get(rel_api, headers=headers, params={"per_page": 100})
         r2.raise_for_status()
         for rel in r2.json():
             if rel.get("tag_name") == f"v{version}":
                 print("[i] Found existing release.")
                 return rel["upload_url"].split("{")[0]
-        raise SystemExit("Release exists but could not fetch upload URL.")
-    else:
-        print(r.text)
-        r.raise_for_status()
-        raise SystemExit("Unexpected GitHub API response.")
+        raise SystemExit("Release exists mas não consegui obter upload URL.")
+    r.raise_for_status()
 
 def upload_asset(upload_url: str, asset_path: Path):
     if not TOKEN:
@@ -282,34 +262,29 @@ def upload_asset(upload_url: str, asset_path: Path):
     with asset_path.open("rb") as f:
         ur = requests.post(f"{upload_url}?name={name}", headers=headers, data=f)
     if ur.status_code == 422 and "already_exists" in ur.text:
-        print("[i] Asset already exists. Deleting and re-uploading…")
+        print("[i] Asset já existe. A apagar e re-upload…")
         rel_api = f"https://api.github.com/repos/{OWNER}/{REPO}/releases/tags/v{read_version()}"
-        r = requests.get(rel_api, headers={"Authorization": f"Bearer {TOKEN}", "Accept": "application/vnd.github+json"})
+        r = requests.get(rel_api, headers=headers)
         r.raise_for_status()
         data = r.json()
         asset = next((a for a in data.get("assets", []) if a.get("name") == name), None)
         if asset:
-            del_url = asset["url"]
-            dr = requests.delete(del_url, headers={"Authorization": f"Bearer {TOKEN}", "Accept": "application/vnd.github+json"})
-            dr.raise_for_status()
-            print("[i] Old asset deleted. Re-uploading…")
+            requests.delete(asset["url"], headers=headers).raise_for_status()
             with asset_path.open("rb") as f2:
-                ur2 = requests.post(f"{upload_url}?name={name}", headers=headers, data=f2)
-            ur2.raise_for_status()
+                requests.post(f"{upload_url}?name={name}", headers=headers, data=f2).raise_for_status()
             print("[✔] Asset re-uploaded.")
             return
     ur.raise_for_status()
     print("[✔] Asset uploaded.")
 
 
-# -------------------- MAIN FLOW --------------------
+# -------------------- MAIN --------------------
 def main():
-    parser = argparse.ArgumentParser(description="Bump version, build installer, commit/push, and create GitHub release.")
-    parser.add_argument("--bump", choices=["patch", "minor", "major", "none"], default="none",
-                        help="Incrementa a versão no version.py (default: none).")
-    parser.add_argument("--build", action="store_true", help="Compila com PyInstaller e cria o .exe com Inno Setup.")
-    parser.add_argument("--release", action="store_true", help="Cria/usa release no GitHub e faz upload do .exe.")
-    parser.add_argument("--skip-git-clean-check", action="store_true", help="Ignora verificação de clean working tree.")
+    parser = argparse.ArgumentParser(description="Bump version, build installer, commit/push, and release.")
+    parser.add_argument("--bump", choices=["patch", "minor", "major", "none"], default="none")
+    parser.add_argument("--build", action="store_true")
+    parser.add_argument("--release", action="store_true")
+    parser.add_argument("--skip-git-clean-check", action="store_true")
     args = parser.parse_args()
 
     old_version = read_version()
@@ -321,7 +296,7 @@ def main():
         version = new_version
         print(f"[i] Bumped version: {old_version} -> {new_version}")
         if not args.skip_git_clean_check and not git_is_clean():
-            print("[!] Working tree not clean. Vamos commitar tudo (inclui outras alterações locais).")
+            print("[!] Working tree sujo, vou commitar tudo.")
         git_commit_all(f"chore(release): bump version to v{version}")
         git_tag(f"v{version}")
         git_push_with_tags()
@@ -333,15 +308,14 @@ def main():
         build_pyinstaller()
         out = build_installer(version)
         if not wait_until_unlocked(out):
-            print("[!] Aviso: o instalador pode estar bloqueado por AV/OneDrive. Prosseguindo…")
+            print("[!] Aviso: instalador pode estar bloqueado. Prosseguindo…")
     else:
         print("[i] Skipping build step.")
 
     if args.release:
-        installer_name = f"CheckinSetup-v{version}.exe"
-        asset_path = OUTDIR / installer_name
+        asset_path = OUTDIR / f"CheckinSetup-v{version}.exe"
         if not asset_path.exists():
-            raise SystemExit(f"Installer not found at {asset_path}. Run with --build first or create it manually.")
+            raise SystemExit(f"Installer not found at {asset_path}")
         upload_url = create_or_get_release_upload_url(version)
         upload_asset(upload_url, asset_path)
         print("[✔] Release uploaded successfully.")
