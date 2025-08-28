@@ -230,7 +230,12 @@ def _maybe_update_silent():
                 pass
     except Exception as e:
         # Falhas de rede ou API não devem bloquear o arranque
-        print(f"[update] check failed: {e}")
+        logf = APPDATA_DIR / "update.log"
+        with logf.open("a", encoding="utf-8") as f:
+            import traceback
+            f.write("[update] Check failed:\n")
+            traceback.print_exc(file=f)
+        print(f"[update] Check failed: {e}")
 
 def _run_ui():
     interface = _load_interface()
