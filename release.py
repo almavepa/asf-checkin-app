@@ -155,7 +155,8 @@ def write_iss(version: str, use_icon: bool, out_iss: Path):
 [Setup]
 AppName=Checkin System
 AppVersion=$VERSION
-DefaultDirName={userappdata}\ASFormacao\Checkin
+; novo destino: %LOCALAPPDATA%\Programs (não requer admin)
+DefaultDirName={localappdata}\Programs\ASFormacao\Checkin
 DefaultGroupName=ASFormacao\Checkin
 OutputDir=$OUTDIR
 OutputBaseFilename=CheckinSetup-v$VERSION
@@ -185,6 +186,7 @@ Filename: "{app}\CheckinApp.exe"; Flags: nowait postinstall skipifsilent
         ICON_LINE=icon_line
     )
     out_iss.write_text(iss_text, encoding="utf-8")
+
 
 
 def build_installer(version: str) -> Path:
