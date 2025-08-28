@@ -1,18 +1,22 @@
 # interface.py
 # Refactor: class-based Tk app + version in title + window icon
+# + Update UI with progress bar, logs, and auto relaunch after update (only if APPLIED_UPDATE=1)
 # -------------------------------------------------------------------
 import os
 import sys
 import time
 import json
 import threading
-import importlib.util
+import subprocess
+import queue
+import re
 from datetime import datetime, date
 from pathlib import Path
 
 import pandas as pd
 import tkinter as tk
 from tkinter import messagebox
+from tkinter import ttk
 import tkinter.font as tkFont
 from PIL import Image, ImageTk
 import serial, serial.tools.list_ports
@@ -34,6 +38,7 @@ from checkin import (
 # --------------------------------------------------------------------------------------
 def load_students_from_file(students_path: str) -> dict:
     try:
+        import importlib.util
         spec = importlib.util.spec_from_file_location("students_data", students_path)
         mod  = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)  # type: ignore
@@ -41,6 +46,212 @@ def load_students_from_file(students_path: str) -> dict:
     except Exception as e:
         print(f"[ERRO] Falha a carregar students.py de {students_path}: {e}")
         return {}
+
+# --------------------------------------------------------------------------------------
+# Update Dialog (progress + logs)
+# --------------------------------------------------------------------------------------
+class UpdateDialog(tk.Toplevel):
+    """
+    Janela modal para mostrar procura/aplicação de atualizações.
+    - Mostra progresso (indeterminado -> determinado quando houver percentagens).
+    - Mostra logs (stdout do updater).
+    - Ao terminar, relança a app apenas se o updater imprimir 'APPLIED_UPDATE=1'.
+    """
+    def __init__(self, parent, app_dir: str, data_dir: str, on_finished_callback):
+        super().__init__(parent)
+        self.parent = parent
+        self.app_dir = app_dir
+        self.data_dir = data_dir
+        self.on_finished_callback = on_finished_callback
+        self.title("Atualizações")
+        self.transient(parent)
+        self.grab_set()
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close_attempt)
+
+        # UI
+        pad = {"padx": 12, "pady": 6}
+        tk.Label(self, text="A verificar/instalar atualizações…", font=("Arial", 12, "bold")).grid(row=0, column=0, sticky="w", **pad)
+
+        self.progress = ttk.Progressbar(self, mode="indeterminate", length=380, maximum=100)
+        self.progress.grid(row=1, column=0, sticky="ew", **pad)
+        self.progress.start(10)
+
+        self.status_var = tk.StringVar(value="A procurar atualizações…")
+        tk.Label(self, textvariable=self.status_var, font=("Arial", 10)).grid(row=2, column=0, sticky="w", **pad)
+
+        self.txt = tk.Text(self, height=10, width=60, wrap="none", state="disabled", bg="white")
+        self.txt.grid(row=3, column=0, sticky="nsew", padx=12)
+        self.grid_rowconfigure(3, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        self.btn_close = tk.Button(self, text="Fechar", state="disabled", command=self._on_close_clicked)
+        self.btn_close.grid(row=4, column=0, pady=(2, 10))
+
+        # Centro na janela principal
+        self.after(10, self._center)
+
+        # Estado interno
+        self._q = queue.Queue()
+        self._stop = False
+        self._applied_update = False
+
+        # Async runner
+        self._thread = threading.Thread(target=self._run_updater, daemon=True)
+        self._thread.start()
+        self._poll_queue()
+
+    def _center(self):
+        self.update_idletasks()
+        ww, wh = self.winfo_width(), self.winfo_height()
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        x = (sw // 2) - (ww // 2)
+        y = (sh // 2) - (wh // 2)
+        self.geometry(f"{ww}x{wh}+{x}+{y}")
+
+    def _append_log(self, line: str):
+        self.txt.config(state="normal")
+        self.txt.insert("end", line + "\n")
+        self.txt.see("end")
+        self.txt.config(state="disabled")
+
+    def _set_progress(self, value: int):
+        try:
+            if self.progress["mode"] != "determinate":
+                self.progress.stop()
+                self.progress.config(mode="determinate")
+            self.progress["value"] = max(0, min(100, value))
+        except Exception:
+            pass
+
+    def _poll_queue(self):
+        try:
+            while True:
+                item = self._q.get_nowait()
+                typ = item[0]
+                if typ == "log":
+                    line = item[1]
+                    self._append_log(line)
+
+                    # marcar se o updater informou que aplicou update
+                    if "APPLIED_UPDATE=1" in line:
+                        self._applied_update = True
+
+                    # tentar detectar percentagens no stdout (ex.: "PROGRESS: 37" ou "... 37%")
+                    m = re.search(r'(\d{1,3})\s*%', line)
+                    if not m:
+                        m = re.search(r'PROGRESS[:\s]+(\d{1,3})', line, re.I)
+                    if m:
+                        self._set_progress(int(m.group(1)))
+                        self.status_var.set("A descarregar/instalar atualização…")
+                    # heurística para estado
+                    if re.search(r'no\s+update|up\s*to\s*date|sem\s+atualiza', line, re.I):
+                        self.status_var.set("Sem atualizações.")
+                    if re.search(r'found|update\s+available|atualiza', line, re.I):
+                        self.status_var.set("Atualização encontrada.")
+
+                elif typ == "status":
+                    self.status_var.set(item[1])
+
+                elif typ == "done":
+                    rc = item[1]
+                    self.progress.stop()
+                    if rc == 0:
+                        if self._applied_update:
+                            self._set_progress(100)
+                            self.status_var.set("Atualização concluída.")
+                            self._append_log("[✔] Atualização concluída.")
+                            self.btn_close.config(state="normal")
+                            # relançar após pequeno delay
+                            self.after(600, self._relaunch_app)
+                        else:
+                            # Sem update — só permitir fechar
+                            if self.progress["mode"] != "determinate":
+                                self.progress.config(mode="determinate")
+                            self._set_progress(100)
+                            self.status_var.set("Sem atualizações disponíveis.")
+                            self.btn_close.config(state="normal")
+                    else:
+                        self.status_var.set("Falha ao atualizar. Consulte os logs.")
+                        self._append_log(f"[!] Exit code: {rc}")
+                        self.btn_close.config(state="normal")
+
+                elif typ == "error":
+                    self.progress.stop()
+                    self.status_var.set(item[1])
+                    self._append_log("[!] " + item[1])
+                    self.btn_close.config(state="normal")
+        except queue.Empty:
+            if not self._stop:
+                self.after(60, self._poll_queue)
+
+    def _run_updater(self):
+        """
+        Corre {APP_DIR}/updater_install.exe e lê stdout.
+        Convenciona-se que o updater imprime:
+          - STATUS: <msg>
+          - PROGRESS: <0..100>
+          - APPLIED_UPDATE=1 (se instalou)
+        """
+        try:
+            exe = Path(self.app_dir) / "updater_install.exe"
+            if not exe.exists():
+                self._q.put(("error", f"updater_install.exe não encontrado em {exe}"))
+                return
+
+            cmd = [str(exe)]
+            self._q.put(("log", f"> {' '.join(cmd)}"))
+
+            proc = subprocess.Popen(
+                cmd,
+                cwd=self.app_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace"
+            )
+
+            for line in proc.stdout:
+                line = line.rstrip("\r\n")
+                self._q.put(("log", line))
+
+            rc = proc.wait()
+            self._q.put(("done", rc))
+        except Exception as e:
+            self._q.put(("error", f"Erro a executar updater: {e}"))
+
+    def _relaunch_app(self):
+        try:
+            # Reabrir a aplicação
+            if getattr(sys, "frozen", False):
+                # Executável PyInstaller
+                exe = sys.executable
+                args = sys.argv[1:]
+                subprocess.Popen([exe] + args, close_fds=True)
+            else:
+                # Script em desenvolvimento
+                script = Path(__file__).resolve()
+                subprocess.Popen([sys.executable, str(script)], close_fds=True)
+        except Exception as e:
+            self._append_log(f"[!] Falhou relançar: {e}")
+        finally:
+            # Encerrar a instância atual
+            try:
+                self.on_finished_callback()
+            except Exception:
+                os._exit(0)
+
+    def _on_close_attempt(self):
+        # Evitar fechar a meio de update
+        if self.btn_close["state"] == "normal":
+            self.destroy()
+        else:
+            messagebox.showinfo("Aguarde", "A atualização está a decorrer. Por favor, aguarde.")
+
+    def _on_close_clicked(self):
+        self.destroy()
+
 
 # --------------------------------------------------------------------------------------
 # Main Application
@@ -92,8 +303,34 @@ class CheckinApp:
         reset_unfinished_entries()
         flush_pending_rows()
 
+        # -------- Check for updates (UI + progress) ----------
+        self.root.after(200, self._check_updates_on_start)
+
         # -------- Serial thread ----------
-        threading.Thread(target=self._iniciar_leitor_serial, daemon=True).start()
+        # Só arranca o leitor ~1.5s depois para não "competir" com a janela de update
+        self.root.after(1500, lambda: threading.Thread(target=self._iniciar_leitor_serial, daemon=True).start())
+
+    # ---------------------- Update flow ----------------------
+    def _check_updates_on_start(self):
+        """
+        Abre o diálogo que corre o updater. Se instalar com sucesso,
+        o diálogo relança a app e fecha esta instância.
+        """
+        updater_path = Path(self.APP_DIR) / "updater_install.exe"
+        if not updater_path.exists():
+            # Sem updater — não faz nada
+            return
+
+        def on_finished():
+            # encerra a app atual (para não ficar 2 instâncias)
+            try:
+                self.root.destroy()
+            except Exception:
+                os._exit(0)
+
+        dlg = UpdateDialog(self.root, self.APP_DIR, self.DATA_DIR, on_finished_callback=on_finished)
+        dlg.lift()
+        dlg.focus_force()
 
     # ---------------------- UI scaffolding ----------------------
     def _center_root(self):
@@ -146,7 +383,7 @@ class CheckinApp:
         tk.Button(self.frame_menu, text="➕ Adicionar aluno", command=self._adicionar_aluno,
                   font=("Arial", 12), fg="#00A49A", bg="white", bd=0, relief="flat",
                   anchor="w", padx=20).pack(fill="x", pady=(20, 0))
-        tk.Button(self.frame_menu, text="📋 Ver registos", command=lambda: self._toggle_menu() or self._toggle_registos(),
+        tk.Button(self.frame_menu, text="📋 Ver registos", command=lambda: self._toggle_menu() | self._toggle_registos(),
                   font=("Arial", 12), fg="#00A49A", bg="white", bd=0, relief="flat",
                   anchor="w", padx=20).pack(fill="x", pady=10)
         tk.Button(self.frame_menu, text="❌ Fechar menu", command=self._toggle_menu,
@@ -359,7 +596,7 @@ class CheckinApp:
         def center_window():
             win.update_idletasks()
             ww, wh = win.winfo_width(), win.winfo_height()
-            sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+            sw, sh = win.winfo_screenwidth(), self.root.winfo_screenheight()
             x = (sw // 2) - (ww // 2)
             y = (sh // 2) - (wh // 2)
             win.geometry(f"{ww}x{wh}+{x}+{y}")

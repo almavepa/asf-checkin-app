@@ -1,5 +1,5 @@
 # main.py
-# - Silently checks GitHub private release for updates on start (apenas no .exe)
+# - Silently checks GitHub private release for updates on start (apenas no .exe, OPCIONAL)
 # - Prompts for token on first run (encrypted save in %APPDATA%\ASFormacao\Checkin)
 # - Ensures first-run seed files (settings.json, students.py, data/email.html, data/fundo.jpg)
 # - Launches your Tk UI in Interface.py
@@ -28,6 +28,7 @@ UPDATER_NAME = "updater_install.exe" if getattr(sys, "frozen", False) else "upda
 
 # ---- Paths to Interface (works frozen or from source) ----
 BASE = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)).resolve()
+# Em Windows o FS é case-insensitive, mas mantemos o nome original
 INTERFACE_PATH = BASE / "Interface.py"
 
 # ---- App data location (per-user) ----
@@ -174,14 +175,19 @@ def _fetch_latest(token: str):
 
 def _maybe_update_silent():
     """
-    Só faz handoff para o updater quando estiver empacotado (.exe).
-    Ao correr do código-fonte (não-frozen), nunca sai da app por causa de updates.
-    Também respeita a env var CHECKIN_SKIP_UPDATE=1 para saltar a verificação.
+    MODO SILENCIOSO (opcional):
+    - Só tenta update silencioso quando EMPACOTADO (PyInstaller) **e**
+      a env var CHECKIN_SILENT_UPDATE=1.
+    - Por defeito NÃO fecha a app nem faz handoff; a UI (Interface.py) mostra progresso.
     """
     if not getattr(sys, "frozen", False):
         return  # a correr do source → não tenta atualizar silenciosamente
 
     if os.getenv("CHECKIN_SKIP_UPDATE") == "1":
+        return
+
+    # Novo comportamento: apenas se explicitamente pedido
+    if os.getenv("CHECKIN_SILENT_UPDATE") != "1":
         return
 
     token = load_token()
@@ -208,8 +214,9 @@ def _maybe_update_silent():
             env = os.environ.copy()
             env["GITHUB_TOKEN"] = token
             cmd = [sys.executable] + args if upd.suffix.lower() == ".py" else args
+            # Em modo silencioso, lançamos o updater e deixamos a app continuar
             subprocess.Popen(cmd, cwd=base, env=env)
-            sys.exit(0)
+            # NOTA: já NÃO fazemos sys.exit(0). A UI vai abrir normalmente.
     except Exception as e:
         print(f"[update] Check failed: {e}")
 
@@ -224,7 +231,7 @@ def _run_ui():
 if __name__ == "__main__":
     # 1) Garantir ficheiros mínimos por utilizador (evita int(None))
     _ensure_first_run_files()
-    # 2) Check updates em silêncio (não bloqueia; só handoff no .exe)
+    # 2) Check updates (modo silencioso OPcional: só se CHECKIN_SILENT_UPDATE=1)
     _maybe_update_silent()
-    # 3) Arrancar UI
+    # 3) Arrancar UI (o Interface.py mostra a janela de atualizações com progresso)
     _run_ui()
