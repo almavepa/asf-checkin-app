@@ -1,6 +1,6 @@
 # main.py
-# - Silently checks GitHub private release for updates on start (apenas no .exe, OPCIONAL)
-# - Prompts for token on first run (encrypted save in %APPDATA%\ASFormacao\Checkin)
+# - Checks GitHub release for updates on start sempre que estiver empacotado (.exe)
+# - (Opcional) Usa token se existir (para repos privados); não pede token para repos públicos
 # - Ensures first-run seed files (settings.json, students.py, data/email.html, data/fundo.jpg)
 # - Launches your Tk UI in Interface.py
 
@@ -13,11 +13,12 @@ import subprocess
 from pathlib import Path
 import importlib, importlib.util
 import runpy
+import webbrowser
 
 import requests
 
 from version import __version__
-from config import load_token, prompt_and_store_token
+from config import load_token  # deixamos de pedir token; usamos só se existir
 
 OWNER = "almavepa"
 REPO  = "asf-checkin-app"
@@ -154,16 +155,17 @@ def _gh_headers(token: str | None):
     return h
 
 def _vtuple(s: str):
-    return tuple(int(x) for x in re.findall(r"\d+", s))
+    nums = re.findall(r"\d+", s)
+    return tuple(int(x) for x in nums[:3]) if nums else (0, 0, 0)
 
-def _fetch_latest(token: str):
+def _fetch_latest(token: str | None):
     r = requests.get(GITHUB_LATEST, timeout=TIMEOUT, headers=_gh_headers(token))
     r.raise_for_status()
     data = r.json()
     tag = (data.get("tag_name") or "").lstrip("vV")
     inst_url = None
     sha_url = None
-    for a in data.get("assets", []):
+    for a in data.get("assets", []) or []:
         name = (a.get("name") or "")
         if re.fullmatch(INSTALLER_PATTERN, name):
             inst_url = a.get("browser_download_url")
@@ -175,10 +177,11 @@ def _fetch_latest(token: str):
 
 def _maybe_update_silent():
     """
-    MODO SILENCIOSO (opcional):
-    - Só tenta update silencioso quando EMPACOTADO (PyInstaller) **e**
-      a env var CHECKIN_SILENT_UPDATE=1.
-    - Por defeito NÃO fecha a app nem faz handoff; a UI (Interface.py) mostra progresso.
+    Verifica updates quando empacotado (.exe).
+    - Não depende mais de CHECKIN_SILENT_UPDATE.
+    - Respeita CHECKIN_SKIP_UPDATE=1 para desativar.
+    - Usa updater_install.exe se existir; caso contrário, abre o URL do instalador no browser.
+    - Não bloqueia a UI (lança processo em background).
     """
     if not getattr(sys, "frozen", False):
         return  # a correr do source → não tenta atualizar silenciosamente
@@ -186,23 +189,22 @@ def _maybe_update_silent():
     if os.getenv("CHECKIN_SKIP_UPDATE") == "1":
         return
 
-    # Novo comportamento: apenas se explicitamente pedido
-    if os.getenv("CHECKIN_SILENT_UPDATE") != "1":
-        return
-
-    token = load_token()
-    if not token:
-        token = prompt_and_store_token()
-        if not token:
-            return
     try:
+        token = load_token()  # se existir, usa; caso contrário, chamadas públicas
+    except Exception:
+        token = None
+
+    try:
+        print(f"[update] current={__version__} – checking latest…")
         remote_ver, inst_url, sha_url = _fetch_latest(token)
-        if _vtuple(remote_ver) > _vtuple(__version__):
-            base = app_dir()
-            upd = base / UPDATER_NAME
-            if not upd.exists():
-                print(f"[update] Updater not found at {upd}")
-                return
+        if _vtuple(remote_ver) <= _vtuple(__version__):
+            print(f"[update] up-to-date (latest={remote_ver})")
+            return
+
+        base = app_dir()
+        upd = base / UPDATER_NAME
+        if upd.exists():
+            # Passa variáveis ao updater (ele trata do download/sha/instalação)
             args = [
                 str(upd),
                 "--pid", str(os.getpid()),
@@ -211,14 +213,24 @@ def _maybe_update_silent():
             ]
             if sha_url:
                 args += ["--sha256", sha_url]
+
             env = os.environ.copy()
-            env["GITHUB_TOKEN"] = token
+            if token:
+                env["GITHUB_TOKEN"] = token
+
             cmd = [sys.executable] + args if upd.suffix.lower() == ".py" else args
-            # Em modo silencioso, lançamos o updater e deixamos a app continuar
-            subprocess.Popen(cmd, cwd=base, env=env)
-            # NOTA: já NÃO fazemos sys.exit(0). A UI vai abrir normalmente.
+            subprocess.Popen(cmd, cwd=base, env=env)  # não bloqueia
+            print("[update] updater launched")
+        else:
+            # Fallback simples: abre o URL do instalador no browser
+            print(f"[update] updater not found at {upd} – opening browser")
+            try:
+                webbrowser.open(inst_url)
+            except Exception:
+                pass
     except Exception as e:
-        print(f"[update] Check failed: {e}")
+        # Falhas de rede ou API não devem bloquear o arranque
+        print(f"[update] check failed: {e}")
 
 def _run_ui():
     interface = _load_interface()
@@ -231,7 +243,7 @@ def _run_ui():
 if __name__ == "__main__":
     # 1) Garantir ficheiros mínimos por utilizador (evita int(None))
     _ensure_first_run_files()
-    # 2) Check updates (modo silencioso OPcional: só se CHECKIN_SILENT_UPDATE=1)
+    # 2) Check updates (agora SEM depender de CHECKIN_SILENT_UPDATE)
     _maybe_update_silent()
-    # 3) Arrancar UI (o Interface.py mostra a janela de atualizações com progresso)
+    # 3) Arrancar UI
     _run_ui()
