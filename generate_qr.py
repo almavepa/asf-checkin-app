@@ -14,7 +14,7 @@ DEFAULTS: Dict[str, Any] = {
     "qr_border": 4,
     "email_sender_name": "ASFormação",
     "school_name": "ASFormação",
-    "min_seconds_between_reads": 5,
+    "min_seconds_between_reads": 3,
     "google_sheet_id": "",
     "sheet_name": "Sheet1",
     "smtp_host": "",
@@ -95,7 +95,7 @@ def _ensure_dirs() -> Tuple[Path, Path]:
 
 def gerar_qr_para_id(student_id: str, nome: str) -> str:
     """
-    Gera um QR (conteúdo: 'ASF{student_id}') e devolve o caminho do PNG criado.
+    Gera um QR (conteúdo: '{student_id}') e devolve o caminho do PNG criado.
     Usa box_size/border a partir do settings.json (com defaults seguros).
     """
     box, border, src, cfg = _qr_params()

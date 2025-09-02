@@ -9,8 +9,22 @@ from dotenv import load_dotenv
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from logging.handlers import RotatingFileHandler
+# de:
+from db import write_checkin
+# para:
+from db import log_event
 
 from paths import get_paths, ensure_file
+
+# --- NOVO: acesso à BD MariaDB ---
+try:
+    from db import write_checkin, db_available
+except Exception:
+    # fallback se db.py não existir ainda
+    def write_checkin(*args, **kwargs):  # type: ignore
+        pass
+    def db_available() -> bool:  # type: ignore
+        return False
 
 # ---------------- paths & first-run ----------------
 APP_DIR, DATA_DIR = get_paths()
@@ -50,6 +64,7 @@ SMTP_PORT   = int(os.getenv("SMTP_PORT", "465"))
 SMTP_USER   = os.getenv("SMTP_USER")
 SMTP_PASS   = os.getenv("SMTP_PASS")
 LOCAL_CSV   = os.getenv("LOCAL_CSV", "1").lower() in ("1", "true", "yes")
+DEVICE_NAME = os.getenv("MACHINE_NAME", None)  # Rececao / Piso 0
 
 # ---------------- Google Sheets ----------------
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -212,7 +227,6 @@ def send_email(student_id, student_name, tipo, timestamp_str):
     if not recipients:
         logger.warning("No email ..."); return
 
-
     msg = MIMEMultipart()
     msg["From"] = formataddr(("ASFormação", SMTP_USER or ""))
     msg["To"] = ", ".join(recipients)
@@ -255,6 +269,15 @@ def log_checkin(student_id):
     append_row_resilient([formatted, student_id, student_name, tipo])
     if LOCAL_CSV:
         append_local_record(student_id, student_name, tipo, ts)
+
+    # --- NOVO: escrever também em MariaDB (se disponível) ---
+    try:
+        # student_id é string; na BD usamos número inteiro
+        sid_num = int("".join(ch for ch in str(student_id) if ch.isdigit()))
+        log_event(sid_num, tipo, DEVICE_NAME)
+    except Exception as e:
+        # nunca quebrar o fluxo se a BD falhar
+        logger.warning(f"DB write skipped/failure: {e}")
 
     last_scan_times[student_id] = {"last_scan": ts, "last_tipo": tipo}
     save_scan_cache()
