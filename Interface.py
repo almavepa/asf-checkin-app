@@ -16,7 +16,9 @@ from datetime import datetime, date
 from pathlib import Path
 import importlib
 import smtplib
-
+from toast import ToastManager
+import worker
+import checkin
 import pandas as pd
 import tkinter as tk
 from tkinter import messagebox
@@ -26,6 +28,7 @@ from PIL import Image, ImageTk
 import serial, serial.tools.list_ports
 from dotenv import load_dotenv
 from generate_qr import gerar_qr_para_id, enviar_qr_por_email
+from worker import enqueue, init as worker_init
 
 from version import __version__                     # <-- VERSION IN TITLE
 from paths import get_paths, ensure_file
@@ -108,6 +111,8 @@ class UpdateDialog(tk.Toplevel):
         self.title("Atualizações")
         self.transient(parent)
         self.grab_set()
+        
+        
 
         self.protocol("WM_DELETE_WINDOW", self._on_close_attempt)
 
@@ -327,6 +332,15 @@ class CheckinApp:
 
         # -------- UI ----------
         self.root = tk.Tk()
+        self._ui_last_scan = {}  # student_id -> monotonic timestamp
+        worker_init(self.root)
+        
+        self.tm = ToastManager(self.root)   # gestor de toasts leve/rápido
+      
+
+        
+        
+        
         # VERSION IN TITLE  -----------------------------------------------------------
         self.root.title(f"Registo de Entradas e Saídas - ASFormação – v{__version__}")
 
@@ -1187,16 +1201,63 @@ class CheckinApp:
         self.root.wait_window(win)
 
     # ---------------------- Check-in + feedback ----------------------
+
+
     def _registar(self, student_id: str):
-        resultado = log_checkin(student_id)
-        if resultado:
-            nome, tipo = resultado
-            self._mostrar_feedback(f"{tipo} registada:\n{nome}", sucesso=True)
-            self._show_last_read(nome, student_id, True)
-        else:
+        """Instant UI, UI-side debounce, heavy work in the background."""
+        if not hasattr(self, "_ui_last_scan"):
+            self._ui_last_scan = {}
+
+        if student_id not in self.students:
+            self._mostrar_feedback("QR não reconhecido!", sucesso=False)
+            self._show_last_read("QR não reconhecido", student_id, False)
+            return
+
+        # --- UI-side debounce (same student within cooldown) ---
+        COOLDOWN = 10  # change to 1 or 0 if you want tighter/freer scanning
+        now = time.monotonic()
+        last = self._ui_last_scan.get(student_id, 0.0)
+        if now - last < COOLDOWN:
             self._mostrar_feedback("Registo ignorado (duplicado)", sucesso=False)
             self._show_last_read("Duplicado", student_id, False)
-        self._atualizar_lista()
+            return
+        self._ui_last_scan[student_id] = now
+
+        # Optimistic feedback (quick guess, no I/O)
+        nome = self.students[student_id][0]
+        prev = getattr(checkin, "last_scan_times", {}).get(student_id)
+        tipo_guess = "Saída" if (prev and prev.get("last_tipo") == "Entrada") else "Entrada"
+        self._mostrar_feedback(f"{tipo_guess}…\n{nome}", sucesso=True)
+        self._show_last_read(nome, student_id, True)
+
+        # Queue the real work (CSV/Sheets/DB/email) off the UI thread
+        enqueue(log_checkin, student_id, on_done=self._after_checkin)
+
+
+
+            
+            
+    def _after_checkin(self, result):
+        """
+        Runs on the Tk thread after background log_checkin finishes.
+        `result` is either (nome, tipo) or None if it was ignored as duplicate.
+        """
+        try:
+            if result:
+                nome, tipo = result
+                # refine the optimistic message with the actual action
+                self._mostrar_feedback(f"{tipo} registada:\n{nome}", sucesso=True)
+                self._show_last_read(nome, "", True)
+            else:
+                # duplicate or ignored
+                self._mostrar_feedback("Registo ignorado (duplicado)", sucesso=False)
+            # refresh the 'Registos de hoje' pane from disk
+            self._atualizar_lista()
+        except Exception:
+            # never let UI crash on callback
+            pass
+
+
 
     # ---------------------- Serial scanner ----------------------
     def _list_serial_ports(self):
@@ -1238,12 +1299,12 @@ class CheckinApp:
                             continue
 
                         def handle(s=code):
+                            
                             if s in self.students:
-                                self._registar(s)
-                                self._show_last_read(self.students[s][0], s, True)
+                                self._registar(s)  # _registar already shows the last-read message
                             else:
-                                self._mostrar_feedback("QR not recognized!", sucesso=False)
-                                self._show_last_read("QR not recognized", s, False)
+                                self._mostrar_feedback("QR não reconhecido!", sucesso=False)
+                                self._show_last_read("QR não reconhecido!", s, False)
 
                         self.root.after(0, handle)
             except Exception as e:
