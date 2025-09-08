@@ -38,7 +38,7 @@ from checkin import (
     load_scan_cache,
     reset_unfinished_entries,
     flush_pending_rows,
-    reload_students as reload_students_in_checkin,
+    
 )
 
 from paths import get_paths as _get_paths_hint
@@ -1065,9 +1065,7 @@ class CheckinApp:
             json.dump(data, f, ensure_ascii=False, indent=4)
             f.write("\n")
 
-    def _reload_students_local(self):
-        self.students = load_students_from_file(self.STUDENTS_FILE)
-        reload_students_in_checkin()  # keep checkin.py’s in-memory copy in sync
+    
 
     # ---------------------- Add student dialog ----------------------
     def _adicionar_aluno(self):
@@ -1106,9 +1104,7 @@ class CheckinApp:
 
             novo_id = str(max(int(k) for k in self.students.keys()) + 1) if self.students else "1001"
 
-            self.students[novo_id] = [nome, email1, email2]
-            self._guardar_students()
-            self._reload_students_local()
+
 
             try:
                 caminho_qr = gerar_qr_para_id(novo_id, nome)

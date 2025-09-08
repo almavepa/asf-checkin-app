@@ -34,8 +34,6 @@ def _connect():
         autocommit=True,
     )
 
-
-
 # ---------- STUDENTS ----------
 def upsert_student(student_number: int, name: str,
                    email1: str | None = None, email2: str | None = None,
@@ -56,7 +54,6 @@ def upsert_student(student_number: int, name: str,
             if email1 is not None: cols.append("email1"); vals.append(email1)
             if email2 is not None: cols.append("email2"); vals.append(email2)
             # qr_code é opcional — só guarda se vier bytes e a coluna existir
-            # testamos existência da coluna via INFORMATION_SCHEMA uma única vez
             cur.execute(
                 "SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS "
                 "WHERE TABLE_SCHEMA=%s AND TABLE_NAME='students' AND COLUMN_NAME='qr_code'",
@@ -126,13 +123,13 @@ def log_event(student_number: int, action: str, device_name: str | None = None) 
     checkins columns: id, student_id (FK students.id), timestamp (DATETIME), action (ENUM), device_name (opcional)
     """
     with _connect() as conn, conn.cursor() as cur:
-        # garantir students.id
+        # obter students.id — sem criar automaticamente
         cur.execute("SELECT id FROM students WHERE student_number=%s", (student_number,))
         r = cur.fetchone()
         if r is None:
-            sid = upsert_student(student_number, f"Aluno {student_number}")
-        else:
-            sid = int(r["id"])
+            raise ValueError(f"Aluno {student_number} não existe na BD")
+
+        sid = int(r["id"])
 
         # inserir em checkins
         # saber se device_name existe
@@ -186,28 +183,31 @@ def fetch_today_checkins():
         else:
             select_fields += ", NULL AS device_name"
 
+        # USAR INTERVALO (sargable) PARA APANHAR "HOJE" COM ÍNDICE
         sql = f"""
             SELECT {select_fields}
             FROM checkins c
             JOIN students s ON s.id = c.student_id
-            WHERE DATE(c.timestamp) = CURRENT_DATE()
+            WHERE c.timestamp >= CURRENT_DATE()
+              AND c.timestamp <  CURRENT_DATE() + INTERVAL 1 DAY
             ORDER BY c.timestamp DESC
         """
         cur.execute(sql)
         return cur.fetchall()
-    
-    # --- Compat: write_checkin delega para log_event (aceita timestamp opcional) ---
+
+# --- Compat: write_checkin delega para log_event (aceita timestamp opcional) ---
 def write_checkin(student_number: int, student_name: str, action: str, ts=None, device_name: str | None = None) -> None:
     # se vier timestamp, usa-o; senão, NOW()
     if ts is None:
+        # manter política: não criar aluno automaticamente
         return log_event(student_number, action, device_name)
     with _connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT id FROM students WHERE student_number=%s", (student_number,))
         r = cur.fetchone()
         if r is None:
-            sid = upsert_student(student_number, student_name or f"Aluno {student_number}")
-        else:
-            sid = int(r["id"])
+            raise ValueError(f"Aluno {student_number} não existe na BD")
+        sid = int(r["id"])
+
         # device_name opcional
         cur.execute(
             "SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS "
@@ -259,10 +259,8 @@ def fetch_all_students(query: str | None = None, limit: int = 1000, offset: int 
             where.append("CAST(student_number AS CHAR) LIKE %s")
             where.append("name LIKE %s")
             if "email1" in cols: where.append("email1 LIKE %s")
-            else: params.append(q)  # placeholder dummy para alinhamento? não necessário se controlarmos params
             if "email2" in cols: where.append("email2 LIKE %s")
             sql += " WHERE " + " OR ".join(where)
-            # construir params coerentes com where
             params = [q, q]
             if "email1" in cols: params.append(q)
             if "email2" in cols: params.append(q)
@@ -324,23 +322,4 @@ def delete_checkin(checkin_id: int) -> int:
     """Apaga um registo (linha) da tabela checkins pelo seu id."""
     with _connect() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM checkins WHERE id=%s", (checkin_id,))
-        return cur.rowcount
-
-def update_student_number(old_student_number: int, new_student_number: int) -> int:
-    """
-    Atualiza o student_number. Garante unicidade.
-    Devolve o nº de linhas afetadas (0 ou 1).
-    """
-    if int(old_student_number) == int(new_student_number):
-        return 0
-    with _connect() as conn, conn.cursor() as cur:
-        # já existe o novo?
-        cur.execute("SELECT 1 FROM students WHERE student_number=%s", (new_student_number,))
-        if cur.fetchone():
-            raise ValueError(f"Já existe um aluno com o nº {new_student_number}.")
-        # atualiza
-        cur.execute(
-            "UPDATE students SET student_number=%s WHERE student_number=%s",
-            (new_student_number, old_student_number)
-        )
         return cur.rowcount

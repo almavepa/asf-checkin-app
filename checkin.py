@@ -1,5 +1,5 @@
 # checkin.py
-import os, sys, json, time, csv, logging, importlib.util
+import os, sys, json, time, csv, logging
 from datetime import datetime
 import smtplib
 from email.utils import formataddr
@@ -9,22 +9,11 @@ from dotenv import load_dotenv
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from logging.handlers import RotatingFileHandler
-# de:
-from db import write_checkin
-# para:
-from db import log_event
+
+# DB: agora usamos diretamente a BD para nome/emails e registos
+from db import log_event, get_student_by_number
 
 from paths import get_paths, ensure_file
-
-# --- NOVO: acesso à BD MariaDB ---
-try:
-    from db import write_checkin, db_available
-except Exception:
-    # fallback se db.py não existir ainda
-    def write_checkin(*args, **kwargs):  # type: ignore
-        pass
-    def db_available() -> bool:  # type: ignore
-        return False
 
 # ---------------- paths & first-run ----------------
 APP_DIR, DATA_DIR = get_paths()
@@ -32,7 +21,7 @@ APP_DIR, DATA_DIR = get_paths()
 EMAIL_HTML       = os.path.join(APP_DIR, "email.html")
 FUNDO_IMG        = os.path.join(APP_DIR, "fundo.jpg")  # optional
 
-STUDENTS_FILE    = os.path.join(DATA_DIR, "students.py")
+# (REMOVIDO) STUDENTS_FILE: deixamos de usar students.py
 REGISTOS_DIR     = os.path.join(DATA_DIR, "registos")
 QRCODES_DIR      = os.path.join(DATA_DIR, "qrcodes")
 LOG_DIR          = os.path.join(DATA_DIR, "logs")
@@ -46,7 +35,7 @@ os.makedirs(QRCODES_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # seed minimal files on first run
-ensure_file(STUDENTS_FILE, 'students = {"1001": ["Aluno Exemplo", "exemplo@mail.com", ""]}\n')
+# (REMOVIDO) ensure_file de students.py
 ensure_file(ENV_FILE, "SMTP_SERVER=\nSMTP_PORT=465\nSMTP_USER=\nSMTP_PASS=\nSCANNER_PORT=COM3\nSCANNER_BAUD=9600\n")
 
 # ---------------- logging ----------------
@@ -65,6 +54,7 @@ SMTP_USER   = os.getenv("SMTP_USER")
 SMTP_PASS   = os.getenv("SMTP_PASS")
 LOCAL_CSV   = os.getenv("LOCAL_CSV", "1").lower() in ("1", "true", "yes")
 DEVICE_NAME = os.getenv("MACHINE_NAME", None)  # Rececao / Piso 0
+MIN_COOLDOWN = int(os.getenv("MIN_SECONDS_BETWEEN_READS", "10") or "10")
 
 # ---------------- Google Sheets ----------------
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -79,31 +69,6 @@ try:
 except Exception as e:
     logger.error(f"Sheets auth failed: {e}")
     sheet = None
-
-# ---------------- students loader ----------------
-def _load_students_dict():
-    try:
-        spec = importlib.util.spec_from_file_location("students_data", STUDENTS_FILE)
-        mod  = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore
-        return dict(mod.students)
-    except Exception as e:
-        logger.error(f"Failed to load students.py from {STUDENTS_FILE}: {e}")
-        return {}
-
-STUDENTS = _load_students_dict()
-
-def reload_students():
-    global STUDENTS
-    STUDENTS = _load_students_dict()
-    logger.info("Reloaded students.py")
-
-def get_emails(students_dict, sid):
-    dados  = students_dict.get(sid, [])
-    nome   = dados[0].strip() if len(dados) > 0 and dados[0] else ""
-    email1 = dados[1].strip() if len(dados) > 1 and dados[1] else ""
-    email2 = dados[2].strip() if len(dados) > 2 and dados[2] else ""
-    return nome, email1, email2
 
 # ---------------- cache (entrada/saída state) ----------------
 last_scan_times = {}
@@ -206,39 +171,40 @@ def flush_pending_rows():
     _save_pending(still)
 
 # ---------------- email ----------------
-def send_email(student_id, student_name, tipo, timestamp_str):
+def _load_email_template() -> str:
     try:
         with open(EMAIL_HTML, "r", encoding="utf-8") as file:
-            html_template = file.read()
+            return file.read()
     except Exception as e:
         logger.error(f"Failed to read template {EMAIL_HTML}: {e}")
-        html_template = "<p>{nome}: {tipo} às {hora}</p>"
+        return "<p>{nome}: {tipo} às {hora}</p>"
 
+def send_email_db(name: str, email1: str | None, email2: str | None, tipo: str, timestamp_str: str):
+    recipients = [e for e in [(email1 or "").strip(), (email2 or "").strip()] if e]
+    if not recipients:
+        logger.info("No guardian emails in DB; skipping email.")
+        return
+    html_template = _load_email_template()
     hora = timestamp_str[9:14] if len(timestamp_str) >= 14 else timestamp_str
     html_content = (
         html_template
-        .replace("{{nome}}", student_name)
+        .replace("{{nome}}", name)
         .replace("{{tipo}}", tipo.lower())
         .replace("{{hora}}", hora)
     )
-
-    _, email1, email2 = get_emails(STUDENTS, student_id)
-    recipients = [e for e in (email1, email2) if e]
-    if not recipients:
-        logger.warning("No email ..."); return
-
     msg = MIMEMultipart()
     msg["From"] = formataddr(("ASFormação", SMTP_USER or ""))
     msg["To"] = ", ".join(recipients)
-    msg["Subject"] = f"Registo de {tipo} de {student_name}"
+    msg["Subject"] = f"Registo de {tipo} de {name}"
     msg.attach(MIMEText(html_content, "html"))
 
     last_err = None
     for attempt in range(1, 4):
         try:
             with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=15) as server:
-                server.login(SMTP_USER, SMTP_PASS)
-                server.sendmail(SMTP_USER, recipients, msg.as_string())
+                if SMTP_USER:
+                    server.login(SMTP_USER, SMTP_PASS)
+                server.sendmail(SMTP_USER or "", recipients, msg.as_string())
             logger.info(f"Email sent to: {', '.join(recipients)}")
             return
         except Exception as e:
@@ -251,9 +217,7 @@ def send_email(student_id, student_name, tipo, timestamp_str):
 def log_checkin(student_id):
     start = time.time()
     ts = datetime.now()
-    info = STUDENTS.get(student_id, ["DESCONHECIDO", ""])
-    student_name = info[0]
-    cooldown = 10
+    cooldown = MIN_COOLDOWN
     tipo = "Entrada"
 
     # toggle entrada/saída based on last scan
@@ -265,23 +229,51 @@ def log_checkin(student_id):
             return
         tipo = "Saída" if prev["last_tipo"] == "Entrada" else "Entrada"
 
+    # Extrair número para a BD
+    digits = "".join(ch for ch in str(student_id) if ch.isdigit())
+    if not digits:
+        logger.warning(f"QR inválido (sem dígitos): {student_id!r}")
+        return
+    sid_num = int(digits)
+
+    # Buscar aluno na BD (NÃO criar)
+    try:
+        row = get_student_by_number(sid_num)  # esperado: dict com keys name, email1, email2
+    except Exception as e:
+        logger.error(f"DB read failed for student {sid_num}: {e}")
+        return
+
+    if not row:
+        logger.info(f"Unknown QR (not in DB): {student_id} (num={sid_num})")
+        return  # UI deve mostrar "QR não reconhecido na base de dados"
+
+    student_name = (row.get("name") or f"Aluno {sid_num}") if isinstance(row, dict) else f"Aluno {sid_num}"
+    email1 = row.get("email1") if isinstance(row, dict) else None
+    email2 = row.get("email2") if isinstance(row, dict) else None
+
+    # 1) MariaDB primeiro (fonte principal)
+    try:
+        log_event(sid_num, tipo, DEVICE_NAME)
+    except Exception as e:
+        # não quebrar — Sheets é backup, mas sem DB não há registo "oficial"
+        logger.warning(f"DB write skipped/failure: {e}")
+
+    # 2) Backup para Sheets
     formatted = ts.strftime("%d-%m-%y %H:%M:%S")
     append_row_resilient([formatted, student_id, student_name, tipo])
+
+    # 3) (Opcional) CSV espelho
     if LOCAL_CSV:
         append_local_record(student_id, student_name, tipo, ts)
 
-    # --- NOVO: escrever também em MariaDB (se disponível) ---
-    try:
-        # student_id é string; na BD usamos número inteiro
-        sid_num = int("".join(ch for ch in str(student_id) if ch.isdigit()))
-        log_event(sid_num, tipo, DEVICE_NAME)
-    except Exception as e:
-        # nunca quebrar o fluxo se a BD falhar
-        logger.warning(f"DB write skipped/failure: {e}")
-
+    # Cache + email
     last_scan_times[student_id] = {"last_scan": ts, "last_tipo": tipo}
     save_scan_cache()
 
     logger.info(f"{tipo} registada: {student_name} ({student_id}) às {formatted}  in {time.time()-start:.3f}s")
-    send_email(student_id, student_name, tipo, formatted)
+    try:
+        send_email_db(student_name, email1, email2, tipo, formatted)
+    except Exception as e:
+        logger.warning(f"Email send failed: {e}")
+
     return student_name, tipo
