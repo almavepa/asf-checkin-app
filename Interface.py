@@ -694,9 +694,18 @@ class CheckinApp:
                 with smtplib.SMTP_SSL(srv, port, timeout=10) as server:
                     if usr:
                         server.login(usr, pwd)
-                    from_addr = usr or "noreply@example.com"
-                    body = "Email de teste – ASFormação (config .env)."
-                    msg_txt = f"From: {from_addr}\r\nTo: {to}\r\nSubject: Teste SMTP\r\n\r\n{body}"
+                    from_addr = usr or "geral@asformacao.com"
+                    body = "Email de teste – ASFormacao (config .env)."
+                    msg_txt = (
+                        f"From: {from_addr}\r\n"
+                        f"To: {to}\r\n"
+                        f"Subject: Teste SMTP\r\n"
+                        "MIME-Version: 1.0\r\n"
+                        "Content-Type: text/plain; charset=utf-8\r\n"
+                        "Content-Transfer-Encoding: 8bit\r\n"
+                        "\r\n"
+                        f"{body}"
+                    ).encode("utf-8")
                     server.sendmail(from_addr, [to], msg_txt.encode("utf-8"))
                 messagebox.showinfo("Teste", "Email de teste enviado (SSL).")
             except Exception as e:
