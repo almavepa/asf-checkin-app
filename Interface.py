@@ -31,6 +31,7 @@ from generate_qr import gerar_qr_para_id, enviar_qr_por_email
 from worker import enqueue, init as worker_init
 from email.mime.text import MIMEText
 from email.utils import formataddr
+from db import get_student_by_number
 
 from version import __version__                     # <-- VERSION IN TITLE
 from paths import get_paths, ensure_file
@@ -526,7 +527,7 @@ class CheckinApp:
             messagebox.showerror("Config", f"Falha a gravar o .env:\n{e}")
 
 
-        def _apply_runtime_env(self, env: dict):
+    def _apply_runtime_env(self, env: dict):
             """Propaga alterações recentes do .env aos módulos em uso (db e checkin)."""
             # checkin (SMTP usados nos emails de check-in)
             try:
@@ -548,7 +549,7 @@ class CheckinApp:
                 if "DB_NAME"      in env: _db.DB_NAME  = env["DB_NAME"]
                 if "MACHINE_NAME" in env: _db.DEVICE   = env["MACHINE_NAME"] or None
             except Exception:
-                pass
+                pass   
 
     def _tools_db(self):
         env = self._read_env_dict()
@@ -1032,15 +1033,67 @@ class CheckinApp:
 
     def _atualizar_lista(self):
         try:
-            if not os.path.exists(self.registo_path):
-                self._set_registos_text(["Sem registos hoje."])
-                return
-            df = pd.read_csv(self.registo_path)
-            hoje = df[df["Data"] == str(date.today())]
-            linhas = [f"{row['Hora']} - {row['Nome']} ({row['Ação']})" for _, row in hoje.iterrows()]
+            linhas = []
+
+            # 1) Tenta ir à BD (mais fiável)
+            try:
+                rows = fetch_today_checkins()  # [{timestamp, name, student_number, action, device_name}, ...]
+                if rows:
+                    # Ordenar por timestamp desc (por segurança)
+                    rows.sort(key=lambda r: r.get("timestamp"), reverse=True)
+                    for r in rows:
+                        ts = r.get("timestamp")
+                        # Formatar hora HH:MM:SS mesmo que venha datetime/str
+                        try:
+                            hora = ts.strftime("%H:%M:%S")
+                        except Exception:
+                            hora = str(ts)[11:19]
+                        nome = r.get("name") or ""
+                        num  = r.get("student_number")
+                        acc  = r.get("action") or r.get("acao") or r.get("Ação") or ""
+                        linhas.append(f"{hora} - {nome} ({num}) - {acc}")
+            except Exception as e:
+                # Se a BD falhar, continuamos para o CSV
+                pass
+
+            # 2) Se não vier nada da BD, usar CSV (como antes)
+            if not linhas:
+                # Recalcula o caminho do CSV de hoje sempre que atualizas
+                reg_dir = os.path.join(self.DATA_DIR, "registos")
+                reg_path = os.path.join(reg_dir, f"registo_{date.today()}.csv")
+
+                if not os.path.exists(reg_path):
+                    # fallback: tentar o CSV mais recente na pasta
+                    if os.path.isdir(reg_dir):
+                        try:
+                            candidates = [f for f in os.listdir(reg_dir) if f.startswith("registo_") and f.endswith(".csv")]
+                            if candidates:
+                                latest = max(candidates)  # nomes YYYY-MM-DD ordenam bem
+                                reg_path = os.path.join(reg_dir, latest)
+                        except Exception:
+                            pass
+
+                if os.path.exists(reg_path):
+                    import pandas as pd
+                    df = pd.read_csv(reg_path)
+                    # Filtra pelo dia de hoje, se a coluna existir
+                    if "Data" in df.columns:
+                        df = df[df["Data"] == str(date.today())]
+                    # Monta as linhas semelhantes ao original
+                    if {"Hora","Nome","Ação"}.issubset(df.columns):
+                        for _, row in df.iterrows():
+                            linhas.append(f"{row['Hora']} - {row['Nome']} ({row.get('ID','')}) - {row['Ação']}")
+                    else:
+                        # Se as colunas não corresponderem, mostra algo útil
+                        for _, row in df.tail(20).iterrows():
+                            linhas.append(" | ".join(str(v) for v in row.values))
+                else:
+                    linhas = ["Sem registos hoje."]
+
             self._set_registos_text(linhas or ["Sem registos hoje."])
         except Exception as e:
             self._set_registos_text([f"Erro a carregar registos: {e}"])
+
 
     # ---------------------- Feedback helpers ----------------------
     def _mostrar_feedback(self, msg, sucesso=True):
@@ -1203,19 +1256,13 @@ class CheckinApp:
 
     # ---------------------- Check-in + feedback ----------------------
 
-
     def _registar(self, student_id: str):
         """Instant UI, UI-side debounce, heavy work in the background."""
         if not hasattr(self, "_ui_last_scan"):
             self._ui_last_scan = {}
 
-        if student_id not in self.students:
-            self._mostrar_feedback("QR não reconhecido!", sucesso=False)
-            self._show_last_read("QR não reconhecido", student_id, False)
-            return
-
-        # --- UI-side debounce (same student within cooldown) ---
-        COOLDOWN = 10  # change to 1 or 0 if you want tighter/freer scanning
+        # --- Debounce UI (mesmo aluno dentro de X segundos) ---
+        COOLDOWN = 10
         now = time.monotonic()
         last = self._ui_last_scan.get(student_id, 0.0)
         if now - last < COOLDOWN:
@@ -1224,15 +1271,31 @@ class CheckinApp:
             return
         self._ui_last_scan[student_id] = now
 
-        # Optimistic feedback (quick guess, no I/O)
-        nome = self.students[student_id][0]
+        # Prever ação (Entrada/Saída) com base no último estado conhecido
         prev = getattr(checkin, "last_scan_times", {}).get(student_id)
         tipo_guess = "Saída" if (prev and prev.get("last_tipo") == "Entrada") else "Entrada"
+
+        # Tentar obter o nome da BD (rápido). Se falhar, mostrar "Aluno <ID>".
+        try:
+            digits = "".join(ch for ch in str(student_id) if ch.isdigit())
+            nome = None
+            if digits:
+                row = get_student_by_number(int(digits))
+                if row and isinstance(row, dict):
+                    nome = row.get("name")
+            if not nome:
+                nome = f"Aluno {digits or student_id}"
+        except Exception:
+            nome = f"Aluno {student_id}"
+
+        # Feedback imediato (como pediste): "Entrada…\nNome"
         self._mostrar_feedback(f"{tipo_guess}…\n{nome}", sucesso=True)
         self._show_last_read(nome, student_id, True)
 
-        # Queue the real work (CSV/Sheets/DB/email) off the UI thread
+        # Trabalho real (DB/Sheets/CSV/email) no worker thread
         enqueue(log_checkin, student_id, on_done=self._after_checkin)
+
+
 
 
 
@@ -1300,12 +1363,7 @@ class CheckinApp:
                             continue
 
                         def handle(s=code):
-                            
-                            if s in self.students:
-                                self._registar(s)  # _registar already shows the last-read message
-                            else:
-                                self._mostrar_feedback("QR não reconhecido!", sucesso=False)
-                                self._show_last_read("QR não reconhecido!", s, False)
+                            self._registar(s)
 
                         self.root.after(0, handle)
             except Exception as e:

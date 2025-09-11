@@ -3,8 +3,7 @@ import os, sys, json, time, csv, logging
 from datetime import datetime
 import smtplib
 from email.utils import formataddr
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from email.message import EmailMessage  # << usar EmailMessage moderno
 from dotenv import load_dotenv
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -14,6 +13,16 @@ from logging.handlers import RotatingFileHandler
 from db import log_event, get_student_by_number
 
 from paths import get_paths, ensure_file
+
+# ---------------- consola "à prova de UTF-8" ----------------
+try:
+    if getattr(sys, "stdout", None):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if getattr(sys, "stderr", None):
+        sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    # Em versões antigas de Python ou ambientes sem reconfigure, ignorar
+    pass
 
 # ---------------- paths & first-run ----------------
 APP_DIR, DATA_DIR = get_paths()
@@ -179,24 +188,40 @@ def _load_email_template() -> str:
         logger.error(f"Failed to read template {EMAIL_HTML}: {e}")
         return "<p>{nome}: {tipo} às {hora}</p>"
 
-def send_email_db(name: str, email1: str | None, email2: str | None, tipo: str, timestamp_str: str):
-    recipients = [e for e in [(email1 or "").strip(), (email2 or "").strip()] if e]
-    if not recipients:
-        logger.info("No guardian emails in DB; skipping email.")
-        return
+def _build_email_html(name: str, tipo: str, timestamp_str: str) -> str:
     html_template = _load_email_template()
     hora = timestamp_str[9:14] if len(timestamp_str) >= 14 else timestamp_str
-    html_content = (
+    return (
         html_template
         .replace("{{nome}}", name)
         .replace("{{tipo}}", tipo.lower())
         .replace("{{hora}}", hora)
     )
-    msg = MIMEMultipart()
-    msg["From"] = formataddr(("ASFormação", SMTP_USER or ""))
+
+def send_email_db(name: str, email1: str | None, email2: str | None, tipo: str, timestamp_str: str):
+    recipients = [e for e in [(email1 or "").strip(), (email2 or "").strip()] if e]
+    if not recipients:
+        logger.info("No guardian emails in DB; skipping email.")
+        return
+
+    html_content = _build_email_html(name, tipo, timestamp_str)
+    subject = f"Registo de {tipo} de {name}"
+
+    # Construir mensagem com UTF-8 garantido
+    msg = EmailMessage()
+    # Texto simples de fallback (opcional)
+    msg.set_content(f"{name}: {tipo} às {timestamp_str}")
+    # Alternativa HTML (UTF-8 por defeito)
+    msg.add_alternative(html_content, subtype="html")
+
+    # Cabeçalhos (EmailMessage trata da codificação)
+    # From pode ter nome com acentos; o servidor verá o envelope separado.
+    from_display = "ASFormação"
+    from_addr = SMTP_USER or ""
+    msg["From"] = formataddr((from_display, from_addr))
+    # To: só os emails (ASCII), para evitar problemas com nomes desconhecidos
     msg["To"] = ", ".join(recipients)
-    msg["Subject"] = f"Registo de {tipo} de {name}"
-    msg.attach(MIMEText(html_content, "html"))
+    msg["Subject"] = subject
 
     last_err = None
     for attempt in range(1, 4):
@@ -204,7 +229,8 @@ def send_email_db(name: str, email1: str | None, email2: str | None, tipo: str, 
             with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=15) as server:
                 if SMTP_USER:
                     server.login(SMTP_USER, SMTP_PASS)
-                server.sendmail(SMTP_USER or "", recipients, msg.as_string())
+                # Enviar com envelope ASCII (só emails) e bytes para evitar ascii-encode
+                server.sendmail(from_addr, recipients, msg.as_bytes())
             logger.info(f"Email sent to: {', '.join(recipients)}")
             return
         except Exception as e:

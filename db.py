@@ -6,6 +6,7 @@ from typing import Optional
 import pymysql
 from dotenv import load_dotenv
 
+
 def _get_data_dir() -> Path:
     try:
         from paths import get_paths
@@ -111,10 +112,24 @@ def save_qr_image(student_number: int, qr_png: bytes) -> None:
             (qr_png, student_number)
         )
 
+# db.py — corrige get_student_by_number para PyMySQL
+
 def get_student_by_number(student_number: int) -> dict | None:
+    # Já tens DictCursor definido na conexão, portanto basta cursor() simples
     with _connect() as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM students WHERE student_number=%s", (student_number,))
-        return cur.fetchone()
+        cur.execute(
+            "SELECT * FROM students WHERE student_number = %s",
+            (student_number,)
+        )
+        # Em PyMySQL, para ver a query executada:
+        try:
+            print("Query executada:", cur._last_executed)
+        except Exception:
+            pass
+        row = cur.fetchone()
+        print("Resultado:", row)
+        return row
+
 
 # ---------- CHECKINS ----------
 def log_event(student_number: int, action: str, device_name: str | None = None) -> None:
