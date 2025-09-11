@@ -152,7 +152,6 @@ def write_iss(version: str, use_icon: bool, out_iss: Path):
 [Setup]
 AppName=Checkin System
 AppVersion=$VERSION
-; instalar em %LOCALAPPDATA%\Programs (user-only, sem admin)
 DefaultDirName={localappdata}\Programs\ASFormacao\Checkin
 DefaultGroupName=ASFormacao\Checkin
 OutputDir=$OUTDIR
@@ -163,11 +162,14 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 SetupLogging=yes
+CloseApplications=yes
+CloseApplicationsFilter=CheckinApp.exe
+RestartApplications=no
 $ICON_LINE
 
 [Files]
 Source: "$APP_EXE"; DestDir: "{app}"; Flags: ignoreversion
-
+Source: "$UPD_EXE"; DestDir: "{app}"; Flags: ignoreversion    ; <-- ADICIONA ESTA LINHA
 
 [Icons]
 Name: "{group}\Checkin System"; Filename: "{app}\CheckinApp.exe"
