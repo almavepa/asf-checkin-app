@@ -1,4 +1,7 @@
 # checkin.py
+import io, contextlib, traceback
+from email.headerregistry import Address
+from email.policy import SMTP as SMTP_POLICY
 import os, sys, json, time, csv, logging
 from datetime import datetime
 import smtplib
@@ -204,6 +207,23 @@ def _address_from_display_email(display_name: str, email_addr: str) -> Address:
     local, _, domain = (email_addr or "").partition("@")
     return Address(display_name=display_name or "", username=local, domain=domain)
 
+import io, contextlib, traceback
+from email.headerregistry import Address
+from email.policy import SMTP as SMTP_POLICY
+
+def _address_from_display_email(display_name: str, email_addr: str) -> Address:
+    local, _, domain = (email_addr or "").partition("@")
+    return Address(display_name=display_name or "", username=local, domain=domain)
+
+def _smtp_debug_to_logger(smtp_obj, logger):
+    """
+    Redireciona o debug do smtplib para o logger (nível DEBUG) usando um buffer.
+    Usar com redirect_stdout no bloco em que se faz EHLO/STARTTLS/send.
+    """
+    smtp_obj.set_debuglevel(1)
+    buf = io.StringIO()
+    return buf, contextlib.redirect_stdout(buf), lambda: logger.debug("SMTP DEBUG:\n%s", buf.getvalue())
+
 def send_email_db(name: str, email1: str | None, email2: str | None, tipo: str, timestamp_str: str):
     recipients = [e for e in [(email1 or "").strip(), (email2 or "").strip()] if e]
     if not recipients:
@@ -213,65 +233,73 @@ def send_email_db(name: str, email1: str | None, email2: str | None, tipo: str, 
     html_content = _build_email_html(name, tipo, timestamp_str)
     subject = f"Registo de {tipo} de {name}"
 
-    msg = EmailMessage()
-    # Fallback texto simples
+    msg = EmailMessage(policy=SMTP_POLICY)  # política SMTP explícita
     msg.set_content(f"{name}: {tipo} às {timestamp_str}")
-    # HTML (UTF-8 por defeito; a lib escolhe QP/base64 conforme necessário)
     msg.add_alternative(html_content, subtype="html")
 
-    # Headers robustos
     from_display = "ASFormação"
-    from_addr = SMTP_USER or ""  # envelope-from será este
+    from_addr = SMTP_USER or ""
     msg["From"] = _address_from_display_email(from_display, from_addr)
-    # To: só endereços (ASCII). Se quiseres nomes, cria Address por destinatário.
-    msg["To"] = ", ".join(recipients)
-    msg["Subject"] = subject  # EmailMessage tratará da codificação (RFC 2047) se necessário
+    msg["To"] = ", ".join(recipients)      # só emails, sem nomes — envelope ASCII
+    msg["Subject"] = subject
+
+    # --- PASSO 1: garantir que a serialização não rebenta e logar o traceback se rebentar
+    try:
+        # Força a geração de headers codificados (RFC 2047) e corpo em bytes
+        msg_bytes = msg.as_bytes()
+        logger.debug("Email serializado: len=%d, Subject=%r, To=%s", len(msg_bytes), subject, ", ".join(recipients))
+    except Exception:
+        logger.exception("Falhou a serialização do email (provável problema de codificação em headers/conteúdo). "
+                         "Subject=%r, From=%s, To=%s", subject, from_addr, ", ".join(recipients))
+        return
 
     last_err = None
     for attempt in range(1, 4):
         try:
-            # Preferimos SSL direto (465) se configurado assim; mantém o teu default
             if SMTP_PORT == 465:
                 with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=30) as server:
-                    server.ehlo()
-                    if SMTP_USER:
-                        server.login(SMTP_USER, SMTP_PASS)
-                    mail_opts = []
-                    try:
-                        # Tentar SMTPUTF8 se o servidor anunciar suporte
-                        if "smtputf8" in (server.esmtp_features or {}):
-                            mail_opts.append("SMTPUTF8")
-                        server.send_message(msg, from_addr=from_addr, to_addrs=recipients, mail_options=mail_opts)
-                    except smtplib.SMTPNotSupportedError:
-                        # Fallback sem SMTPUTF8
-                        server.send_message(msg, from_addr=from_addr, to_addrs=recipients)
-            else:
-                # STARTTLS (ex.: 587)
-                with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30) as server:
-                    server.ehlo()
-                    try:
-                        server.starttls()
+                    buf, redir, flush = _smtp_debug_to_logger(server, logger)
+                    with redir:
                         server.ehlo()
-                    except Exception:
-                        # Alguns servidores trabalham sem STARTTLS (não recomendado)
-                        pass
-                    if SMTP_USER:
-                        server.login(SMTP_USER, SMTP_PASS)
-                    mail_opts = []
-                    try:
-                        if "smtputf8" in (server.esmtp_features or {}):
-                            mail_opts.append("SMTPUTF8")
-                        server.send_message(msg, from_addr=from_addr, to_addrs=recipients, mail_options=mail_opts)
-                    except smtplib.SMTPNotSupportedError:
-                        server.send_message(msg, from_addr=from_addr, to_addrs=recipients)
+                        if SMTP_USER:
+                            server.login(SMTP_USER, SMTP_PASS)
+                        mail_opts = []
+                        try:
+                            if "smtputf8" in (server.esmtp_features or {}):
+                                mail_opts.append("SMTPUTF8")
+                            server.send_message(msg, from_addr=from_addr, to_addrs=recipients, mail_options=mail_opts)
+                        except smtplib.SMTPNotSupportedError:
+                            server.send_message(msg, from_addr=from_addr, to_addrs=recipients)
+                    flush()
+            else:
+                with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30) as server:
+                    buf, redir, flush = _smtp_debug_to_logger(server, logger)
+                    with redir:
+                        server.ehlo()
+                        try:
+                            server.starttls(); server.ehlo()
+                        except Exception:
+                            logger.debug("STARTTLS indisponível; a continuar assim mesmo.")
+                        if SMTP_USER:
+                            server.login(SMTP_USER, SMTP_PASS)
+                        mail_opts = []
+                        try:
+                            if "smtputf8" in (server.esmtp_features or {}):
+                                mail_opts.append("SMTPUTF8")
+                            server.send_message(msg, from_addr=from_addr, to_addrs=recipients, mail_options=mail_opts)
+                        except smtplib.SMTPNotSupportedError:
+                            server.send_message(msg, from_addr=from_addr, to_addrs=recipients)
+                    flush()
 
-            logger.info(f"Email sent to: {', '.join(recipients)}")
+            logger.info("Email sent to: %s", ", ".join(recipients))
             return
-        except Exception as e:
-            last_err = e
-            logger.warning(f"Email attempt {attempt} failed: {e}")
+        except Exception:
+            last_err = traceback.format_exc()
+            logger.error("Email attempt %d failed.\n%s", attempt, last_err)
             time.sleep(min(2 ** attempt, 8))
-    logger.error(f"Email failed after retries: {last_err}")
+
+    logger.error("Email failed after retries. Último erro:\n%s", last_err or "sem detalhe")
+
 
 # ---------------- main check-in API ----------------
 def log_checkin(student_id):
