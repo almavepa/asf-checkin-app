@@ -169,8 +169,7 @@ $ICON_LINE
 
 [Files]
 Source: "$APP_EXE"; DestDir: "{app}"; Flags: ignoreversion
-Source: "$UPD_EXE"; DestDir: "{app}"; Flags: ignoreversion    ; <-- ADICIONA ESTA LINHA
-
+Source: "$UPD_EXE"; DestDir: "{app}"; Flags: ignoreversion 
 [Icons]
 Name: "{group}\Checkin System"; Filename: "{app}\CheckinApp.exe"
 Name: "{userdesktop}\Checkin System"; Filename: "{app}\CheckinApp.exe"
