@@ -3,7 +3,8 @@ import os, sys, json, time, csv, logging
 from datetime import datetime
 import smtplib
 from email.utils import formataddr
-from email.message import EmailMessage  # << usar EmailMessage moderno
+from email.message import EmailMessage  # EmailMessage moderno
+from email.headerregistry import Address  # <- robusto para nomes com acentos
 from dotenv import load_dotenv
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -198,6 +199,11 @@ def _build_email_html(name: str, tipo: str, timestamp_str: str) -> str:
         .replace("{{hora}}", hora)
     )
 
+def _address_from_display_email(display_name: str, email_addr: str) -> Address:
+    """Cria um Address que codifica corretamente nomes com acentos no header."""
+    local, _, domain = (email_addr or "").partition("@")
+    return Address(display_name=display_name or "", username=local, domain=domain)
+
 def send_email_db(name: str, email1: str | None, email2: str | None, tipo: str, timestamp_str: str):
     recipients = [e for e in [(email1 or "").strip(), (email2 or "").strip()] if e]
     if not recipients:
@@ -207,30 +213,58 @@ def send_email_db(name: str, email1: str | None, email2: str | None, tipo: str, 
     html_content = _build_email_html(name, tipo, timestamp_str)
     subject = f"Registo de {tipo} de {name}"
 
-    # Construir mensagem com UTF-8 garantido
     msg = EmailMessage()
-    # Texto simples de fallback (opcional)
+    # Fallback texto simples
     msg.set_content(f"{name}: {tipo} às {timestamp_str}")
-    # Alternativa HTML (UTF-8 por defeito)
+    # HTML (UTF-8 por defeito; a lib escolhe QP/base64 conforme necessário)
     msg.add_alternative(html_content, subtype="html")
 
-    # Cabeçalhos (EmailMessage trata da codificação)
-    # From pode ter nome com acentos; o servidor verá o envelope separado.
+    # Headers robustos
     from_display = "ASFormação"
-    from_addr = SMTP_USER or ""
-    msg["From"] = formataddr((from_display, from_addr))
-    # To: só os emails (ASCII), para evitar problemas com nomes desconhecidos
+    from_addr = SMTP_USER or ""  # envelope-from será este
+    msg["From"] = _address_from_display_email(from_display, from_addr)
+    # To: só endereços (ASCII). Se quiseres nomes, cria Address por destinatário.
     msg["To"] = ", ".join(recipients)
-    msg["Subject"] = subject
+    msg["Subject"] = subject  # EmailMessage tratará da codificação (RFC 2047) se necessário
 
     last_err = None
     for attempt in range(1, 4):
         try:
-            with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=15) as server:
-                if SMTP_USER:
-                    server.login(SMTP_USER, SMTP_PASS)
-                # Enviar com envelope ASCII (só emails) e bytes para evitar ascii-encode
-                server.sendmail(from_addr, recipients, msg.as_bytes())
+            # Preferimos SSL direto (465) se configurado assim; mantém o teu default
+            if SMTP_PORT == 465:
+                with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=30) as server:
+                    server.ehlo()
+                    if SMTP_USER:
+                        server.login(SMTP_USER, SMTP_PASS)
+                    mail_opts = []
+                    try:
+                        # Tentar SMTPUTF8 se o servidor anunciar suporte
+                        if "smtputf8" in (server.esmtp_features or {}):
+                            mail_opts.append("SMTPUTF8")
+                        server.send_message(msg, from_addr=from_addr, to_addrs=recipients, mail_options=mail_opts)
+                    except smtplib.SMTPNotSupportedError:
+                        # Fallback sem SMTPUTF8
+                        server.send_message(msg, from_addr=from_addr, to_addrs=recipients)
+            else:
+                # STARTTLS (ex.: 587)
+                with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30) as server:
+                    server.ehlo()
+                    try:
+                        server.starttls()
+                        server.ehlo()
+                    except Exception:
+                        # Alguns servidores trabalham sem STARTTLS (não recomendado)
+                        pass
+                    if SMTP_USER:
+                        server.login(SMTP_USER, SMTP_PASS)
+                    mail_opts = []
+                    try:
+                        if "smtputf8" in (server.esmtp_features or {}):
+                            mail_opts.append("SMTPUTF8")
+                        server.send_message(msg, from_addr=from_addr, to_addrs=recipients, mail_options=mail_opts)
+                    except smtplib.SMTPNotSupportedError:
+                        server.send_message(msg, from_addr=from_addr, to_addrs=recipients)
+
             logger.info(f"Email sent to: {', '.join(recipients)}")
             return
         except Exception as e:
