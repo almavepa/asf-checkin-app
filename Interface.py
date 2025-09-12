@@ -381,8 +381,8 @@ class CheckinApp:
             # lê do .env (já foi carregado em __init__)
             host = os.getenv("DB_HOST", "127.0.0.1")
             port = int(os.getenv("DB_PORT", "3306") or "3306")
-            user = os.getenv("DB_USER", "root")
-            pwd  = os.getenv("DB_PASSWORD", "")
+            user = os.getenv("DB_USER", "checkin_db")
+            pwd  = os.getenv("DB_PASSWORD", "checkin_pass")
             db   = os.getenv("DB_NAME", "checkin_db")
             conn = pymysql.connect(host=host, port=port, user=user, password=pwd, database=db,
                                    charset="utf8mb4", autocommit=True)

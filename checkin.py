@@ -225,80 +225,73 @@ def _smtp_debug_to_logger(smtp_obj, logger):
     return buf, contextlib.redirect_stdout(buf), lambda: logger.debug("SMTP DEBUG:\n%s", buf.getvalue())
 
 def send_email_db(name: str, email1: str | None, email2: str | None, tipo: str, timestamp_str: str):
+    import socket, ssl
     recipients = [e for e in [(email1 or "").strip(), (email2 or "").strip()] if e]
     if not recipients:
-        logger.info("No guardian emails in DB; skipping email.")
+        logger.warning("Email: sem destinatários (email1=%r, email2=%r) — a ignorar envio.", email1, email2)
         return
 
     html_content = _build_email_html(name, tipo, timestamp_str)
     subject = f"Registo de {tipo} de {name}"
 
-    msg = EmailMessage(policy=SMTP_POLICY)  # política SMTP explícita
+    msg = EmailMessage()
     msg.set_content(f"{name}: {tipo} às {timestamp_str}")
     msg.add_alternative(html_content, subtype="html")
 
     from_display = "ASFormação"
     from_addr = SMTP_USER or ""
-    msg["From"] = _address_from_display_email(from_display, from_addr)
-    msg["To"] = ", ".join(recipients)      # só emails, sem nomes — envelope ASCII
+    msg["From"] = formataddr((from_display, from_addr))
+    msg["To"] = ", ".join(recipients)
     msg["Subject"] = subject
 
-    # --- PASSO 1: garantir que a serialização não rebenta e logar o traceback se rebentar
+    # ---- DNS: recolhe IPv4/IPv6 e prioriza IPv4 (podes forçar com SMTP_FORCE_IPV4=1) ----
+    force_ipv4 = os.getenv("SMTP_FORCE_IPV4", "0").lower() in ("1","true","yes")
+    family = socket.AF_INET if force_ipv4 else socket.AF_UNSPEC
     try:
-        # Força a geração de headers codificados (RFC 2047) e corpo em bytes
-        msg_bytes = msg.as_bytes()
-        logger.debug("Email serializado: len=%d, Subject=%r, To=%s", len(msg_bytes), subject, ", ".join(recipients))
-    except Exception:
-        logger.exception("Falhou a serialização do email (provável problema de codificação em headers/conteúdo). "
-                         "Subject=%r, From=%s, To=%s", subject, from_addr, ", ".join(recipients))
+        infos = socket.getaddrinfo(SMTP_SERVER, int(SMTP_PORT), family, socket.SOCK_STREAM)
+    except Exception as e:
+        logger.error("SMTP: falha a resolver %s:%s (%s)", SMTP_SERVER, SMTP_PORT, e)
         return
 
+    # ordena: v4 primeiro, depois v6
+    def _key(info):
+        af = info[0]
+        return 0 if af == socket.AF_INET else 1
+    infos.sort(key=_key)
+
+    TIMEOUT = int(os.getenv("SMTP_TIMEOUT", "45") or "45")  # mais folga que 15s
+    context = ssl.create_default_context()  # SNI/TLS1.2+ por defeito
+
     last_err = None
-    for attempt in range(1, 4):
+    for i, (af, socktype, proto, _, sockaddr) in enumerate(infos, 1):
+        ip = sockaddr[0]
+        ipver = "IPv4" if af == socket.AF_INET else "IPv6"
         try:
-            if SMTP_PORT == 465:
-                with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=30) as server:
-                    buf, redir, flush = _smtp_debug_to_logger(server, logger)
-                    with redir:
+            t0 = time.time()
+            logger.info("SMTP: tentar %s %s:%s (%s) | user=%r | timeout=%ss",
+                        SMTP_SERVER, ip, SMTP_PORT, ipver, SMTP_USER, TIMEOUT)
+            # Conexão “manual” para controlar IP e timeout
+            with socket.create_connection((ip, int(SMTP_PORT)), timeout=TIMEOUT) as raw:
+                with context.wrap_socket(raw, server_hostname=SMTP_SERVER) as tls_sock:
+                    # Usa o socket TLS já aberto com smtplib
+                    with smtplib.SMTP_SSL(host=None) as server:
+                        server.sock = tls_sock  # injeta o socket já ligado
+                        server.file = server.sock.makefile("rb")  # para getreply()
                         server.ehlo()
                         if SMTP_USER:
                             server.login(SMTP_USER, SMTP_PASS)
-                        mail_opts = []
-                        try:
-                            if "smtputf8" in (server.esmtp_features or {}):
-                                mail_opts.append("SMTPUTF8")
-                            server.send_message(msg, from_addr=from_addr, to_addrs=recipients, mail_options=mail_opts)
-                        except smtplib.SMTPNotSupportedError:
-                            server.send_message(msg, from_addr=from_addr, to_addrs=recipients)
-                    flush()
-            else:
-                with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30) as server:
-                    buf, redir, flush = _smtp_debug_to_logger(server, logger)
-                    with redir:
-                        server.ehlo()
-                        try:
-                            server.starttls(); server.ehlo()
-                        except Exception:
-                            logger.debug("STARTTLS indisponível; a continuar assim mesmo.")
-                        if SMTP_USER:
-                            server.login(SMTP_USER, SMTP_PASS)
-                        mail_opts = []
-                        try:
-                            if "smtputf8" in (server.esmtp_features or {}):
-                                mail_opts.append("SMTPUTF8")
-                            server.send_message(msg, from_addr=from_addr, to_addrs=recipients, mail_options=mail_opts)
-                        except smtplib.SMTPNotSupportedError:
-                            server.send_message(msg, from_addr=from_addr, to_addrs=recipients)
-                    flush()
-
-            logger.info("Email sent to: %s", ", ".join(recipients))
+                        server.sendmail(from_addr, recipients, msg.as_bytes())
+            dt = time.time() - t0
+            logger.info("Email: enviado OK em %.1fs | to=%s | subj=%r | via %s %s:%s",
+                        dt, ", ".join(recipients), subject, ipver, ip, SMTP_PORT)
             return
-        except Exception:
-            last_err = traceback.format_exc()
-            logger.error("Email attempt %d failed.\n%s", attempt, last_err)
-            time.sleep(min(2 ** attempt, 8))
+        except Exception as e:
+            last_err = e
+            logger.error("SMTP: falha via %s %s:%s | err=%s", ipver, ip, SMTP_PORT, e)
 
-    logger.error("Email failed after retries. Último erro:\n%s", last_err or "sem detalhe")
+    logger.error("Email: falhou após tentar todos os IPs (%s) | último erro: %r",
+                 ", ".join({sockaddr[0] for *_, sockaddr in infos}), last_err)
+
 
 
 # ---------------- main check-in API ----------------
