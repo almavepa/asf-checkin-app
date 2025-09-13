@@ -136,8 +136,8 @@ def _send_email_with_attachment(
     with open(attachment_path, "rb") as f:
         msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=Path(attachment_path).name)
 
-    with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as server:
-        server.starttls()
+    with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=15) as server:
+        
         if smtp_user:
             server.login(smtp_user, smtp_password or "")
         server.send_message(msg)

@@ -12,6 +12,8 @@ from dotenv import load_dotenv
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from logging.handlers import RotatingFileHandler
+from datetime import datetime, time
+from db import write_checkin
 
 # DB: agora usamos diretamente a BD para nome/emails e registos
 from db import log_event, get_student_by_number
@@ -116,12 +118,23 @@ def save_scan_cache():
     except Exception as e:
         logger.error(f"Failed to write cache {CACHE_FILE}: {e}")
 
+
+
 def reset_unfinished_entries():
+    """Para cada aluno que ficou com 'Entrada' em dias anteriores,
+    regista uma 'Saída' real na BD às 23:59 desse dia e atualiza em memória.
+    """
     today = datetime.now().date()
     for sid, info in list(last_scan_times.items()):
         if info["last_scan"].date() < today and info["last_tipo"] == "Entrada":
-            last_scan_times[sid]["last_tipo"] = "Saída"
-            logger.info(f"Forcing 'Saída' in memory for {sid} from previous day.")
+            # Força saída às 23:59 do dia da última entrada
+            ts_saida = datetime.combine(info["last_scan"].date(), time(23, 59, 0))
+            try:
+                write_checkin(int(sid), "", "Saída", ts=ts_saida)
+                last_scan_times[sid]["last_tipo"] = "Saída"
+                logger.info(f"Forçada 'Saída' na BD e em memória para {sid} ({ts_saida}).")
+            except Exception as e:
+                logger.error(f"Falhou forçar 'Saída' para {sid}: {e}")
 
 # ---------------- local CSV mirror ----------------
 def _ensure_day_csv(ts: datetime) -> str:
@@ -224,11 +237,14 @@ def _smtp_debug_to_logger(smtp_obj, logger):
     buf = io.StringIO()
     return buf, contextlib.redirect_stdout(buf), lambda: logger.debug("SMTP DEBUG:\n%s", buf.getvalue())
 
-def send_email_db(name: str, email1: str | None, email2: str | None, tipo: str, timestamp_str: str):
-    import socket, ssl
+def send_email_db(name: str, email1: str | None, email2: str | None,
+                  tipo: str, timestamp_str: str):
+    import socket, ssl, smtplib
+
     recipients = [e for e in [(email1 or "").strip(), (email2 or "").strip()] if e]
     if not recipients:
-        logger.warning("Email: sem destinatários (email1=%r, email2=%r) — a ignorar envio.", email1, email2)
+        logger.warning("Email: sem destinatários (email1=%r, email2=%r) — a ignorar envio.",
+                       email1, email2)
         return
 
     html_content = _build_email_html(name, tipo, timestamp_str)
@@ -237,60 +253,69 @@ def send_email_db(name: str, email1: str | None, email2: str | None, tipo: str, 
     msg = EmailMessage()
     msg.set_content(f"{name}: {tipo} às {timestamp_str}")
     msg.add_alternative(html_content, subtype="html")
-
     from_display = "ASFormação"
     from_addr = SMTP_USER or ""
     msg["From"] = formataddr((from_display, from_addr))
     msg["To"] = ", ".join(recipients)
     msg["Subject"] = subject
 
-    # ---- DNS: recolhe IPv4/IPv6 e prioriza IPv4 (podes forçar com SMTP_FORCE_IPV4=1) ----
-    force_ipv4 = os.getenv("SMTP_FORCE_IPV4", "0").lower() in ("1","true","yes")
-    family = socket.AF_INET if force_ipv4 else socket.AF_UNSPEC
+    # Resolver IPv4/IPv6
+    family = socket.AF_INET if os.getenv("SMTP_FORCE_IPV4", "0") in ("1", "true", "yes") else socket.AF_UNSPEC
     try:
-        infos = socket.getaddrinfo(SMTP_SERVER, int(SMTP_PORT), family, socket.SOCK_STREAM)
+        infos = socket.getaddrinfo(SMTP_SERVER, SMTP_PORT, family, socket.SOCK_STREAM)
     except Exception as e:
         logger.error("SMTP: falha a resolver %s:%s (%s)", SMTP_SERVER, SMTP_PORT, e)
         return
 
-    # ordena: v4 primeiro, depois v6
-    def _key(info):
-        af = info[0]
-        return 0 if af == socket.AF_INET else 1
-    infos.sort(key=_key)
-
-    TIMEOUT = int(os.getenv("SMTP_TIMEOUT", "45") or "45")  # mais folga que 15s
-    context = ssl.create_default_context()  # SNI/TLS1.2+ por defeito
+    infos.sort(key=lambda x: 0 if x[0] == socket.AF_INET else 1)  # IPv4 primeiro
+    TIMEOUT = int(os.getenv("SMTP_TIMEOUT", "60") or "60")
+    context = ssl.create_default_context()
 
     last_err = None
-    for i, (af, socktype, proto, _, sockaddr) in enumerate(infos, 1):
+    for af, socktype, proto, _, sockaddr in infos:
         ip = sockaddr[0]
         ipver = "IPv4" if af == socket.AF_INET else "IPv6"
         try:
-            t0 = time.time()
-            logger.info("SMTP: tentar %s %s:%s (%s) | user=%r | timeout=%ss",
-                        SMTP_SERVER, ip, SMTP_PORT, ipver, SMTP_USER, TIMEOUT)
-            # Conexão “manual” para controlar IP e timeout
-            with socket.create_connection((ip, int(SMTP_PORT)), timeout=TIMEOUT) as raw:
+            logger.info("SMTP: tentar %s %s:%s (%s)", SMTP_SERVER, ip, SMTP_PORT, ipver)
+
+            with socket.create_connection((ip, SMTP_PORT), timeout=TIMEOUT) as raw:
                 with context.wrap_socket(raw, server_hostname=SMTP_SERVER) as tls_sock:
-                    # Usa o socket TLS já aberto com smtplib
-                    with smtplib.SMTP_SSL(host=None) as server:
-                        server.sock = tls_sock  # injeta o socket já ligado
-                        server.file = server.sock.makefile("rb")  # para getreply()
-                        server.ehlo()
+                    server = smtplib.SMTP_SSL()
+                    #server.set_debuglevel(1)
+                    try:
+                        server.sock = tls_sock
+                        server.file = server.sock.makefile("rb")
+
+                        code, banner = server.getreply()
+                        if code != 220:
+                            raise smtplib.SMTPResponseException(code, banner)
+
+                        server.ehlo("asf-checkin")  # hostname neutro
                         if SMTP_USER:
                             server.login(SMTP_USER, SMTP_PASS)
-                        server.sendmail(from_addr, recipients, msg.as_bytes())
-            dt = time.time() - t0
-            logger.info("Email: enviado OK em %.1fs | to=%s | subj=%r | via %s %s:%s",
-                        dt, ", ".join(recipients), subject, ipver, ip, SMTP_PORT)
+
+                        mail_opts = []
+                        if server.has_extn('smtputf8'):
+                            mail_opts.append('SMTPUTF8')
+
+                        server.send_message(msg, mail_options=mail_opts)
+
+                    finally:
+                        try:
+                            server.quit()
+                        except Exception:
+                            server.close()
+
+            logger.info("Email: enviado OK | to=%s | subj=%r | via %s %s:%s",
+                        ", ".join(recipients), subject, ipver, ip, SMTP_PORT)
             return
         except Exception as e:
             last_err = e
-            logger.error("SMTP: falha via %s %s:%s | err=%s", ipver, ip, SMTP_PORT, e)
+            logger.error("SMTP: falha via %s %s:%s | err=%r", ipver, ip, SMTP_PORT, e)
 
-    logger.error("Email: falhou após tentar todos os IPs (%s) | último erro: %r",
-                 ", ".join({sockaddr[0] for *_, sockaddr in infos}), last_err)
+    logger.error("Email: falhou em todos os IPs | último erro: %r", last_err)
+
+
 
 
 

@@ -81,19 +81,6 @@ except Exception as e:
 
 
 
-# --------------------------------------------------------------------------------------
-# Utility: safe import of students.py dict by path
-# --------------------------------------------------------------------------------------
-def load_students_from_file(students_path: str) -> dict:
-    try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("students_data", students_path)
-        mod  = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # type: ignore
-        return dict(mod.students)
-    except Exception as e:
-        print(f"[ERRO] Falha a carregar students.py de {students_path}: {e}")
-        return {}
 
 # --------------------------------------------------------------------------------------
 # Update Dialog (progress + logs)
@@ -316,7 +303,7 @@ class CheckinApp:
         self.EMAIL_HTML   = os.path.join(self.APP_DIR, "email.html")
         self.FUNDO_IMG    = os.path.join(self.APP_DIR, "fundo.jpg")
 
-        self.STUDENTS_FILE = os.path.join(self.DATA_DIR, "students.py")
+        #self.STUDENTS_FILE = os.path.join(self.DATA_DIR, "students.py")
         self.REGISTOS_DIR  = os.path.join(self.DATA_DIR, "registos")
         self.QRCODES_DIR   = os.path.join(self.DATA_DIR, "qrcodes")
         self.ENV_FILE      = os.path.join(self.DATA_DIR, ".env")
@@ -327,7 +314,7 @@ class CheckinApp:
         load_dotenv(self.ENV_FILE)  # read SCANNER_PORT / SCANNER_BAUD
 
         # -------- Data ----------
-        self.students = load_students_from_file(self.STUDENTS_FILE)
+        #self.students = load_students_from_file(self.STUDENTS_FILE)
         self.registo_path = os.path.join(self.REGISTOS_DIR, f"registo_{date.today()}.csv")
         if not os.path.exists(self.registo_path):
             df = pd.DataFrame(columns=["ID", "Nome", "Data", "Hora", "Ação"])
@@ -694,7 +681,7 @@ class CheckinApp:
                 usr  = v_user.get().strip()
                 pwd  = v_pass.get()
 
-                with smtplib.SMTP_SSL(srv, port, timeout=10) as server:
+                with smtplib.SMTP_SSL(srv, port, local_hostname="asf-local",timeout=10) as server:
                     if usr:
                         server.login(usr, pwd)
                     msg = MIMEText("Email de teste – ASFormação (config .env).", "plain", "utf-8")
