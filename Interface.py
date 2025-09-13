@@ -682,6 +682,7 @@ class CheckinApp:
                 pwd  = v_pass.get()
 
                 with smtplib.SMTP_SSL(srv, port, local_hostname="asf-local",timeout=10) as server:
+                    server.ehlo("asf-local")
                     if usr:
                         server.login(usr, pwd)
                     msg = MIMEText("Email de teste – ASFormação (config .env).", "plain", "utf-8")

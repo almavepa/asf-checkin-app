@@ -12,8 +12,6 @@ from dotenv import load_dotenv
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from logging.handlers import RotatingFileHandler
-from datetime import datetime, time
-from db import write_checkin
 
 # DB: agora usamos diretamente a BD para nome/emails e registos
 from db import log_event, get_student_by_number
@@ -118,23 +116,12 @@ def save_scan_cache():
     except Exception as e:
         logger.error(f"Failed to write cache {CACHE_FILE}: {e}")
 
-
-
 def reset_unfinished_entries():
-    """Para cada aluno que ficou com 'Entrada' em dias anteriores,
-    regista uma 'Saída' real na BD às 23:59 desse dia e atualiza em memória.
-    """
     today = datetime.now().date()
     for sid, info in list(last_scan_times.items()):
         if info["last_scan"].date() < today and info["last_tipo"] == "Entrada":
-            # Força saída às 23:59 do dia da última entrada
-            ts_saida = datetime.combine(info["last_scan"].date(), time(23, 59, 0))
-            try:
-                write_checkin(int(sid), "", "Saída", ts=ts_saida)
-                last_scan_times[sid]["last_tipo"] = "Saída"
-                logger.info(f"Forçada 'Saída' na BD e em memória para {sid} ({ts_saida}).")
-            except Exception as e:
-                logger.error(f"Falhou forçar 'Saída' para {sid}: {e}")
+            last_scan_times[sid]["last_tipo"] = "Saída"
+            logger.info(f"Forcing 'Saída' in memory for {sid} from previous day.")
 
 # ---------------- local CSV mirror ----------------
 def _ensure_day_csv(ts: datetime) -> str:
