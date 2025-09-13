@@ -36,7 +36,7 @@ INTERFACE_PATH = BASE / "Interface.py"
 APPDATA_DIR = Path(os.getenv("APPDATA") or Path.home() / "AppData" / "Roaming") / "ASFormacao" / "Checkin"
 DATA_DIR = APPDATA_DIR / "data"
 SETTINGS_FILE = APPDATA_DIR / "settings.json"
-STUDENTS_FILE = APPDATA_DIR / "students.py"
+#STUDENTS_FILE = APPDATA_DIR / "students.py"
 
 # ---- Default seeds (safe first-run) ----
 DEFAULT_SETTINGS = {
@@ -106,8 +106,8 @@ def _ensure_first_run_files():
         SETTINGS_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # students.py: minimal if missing
-    if not STUDENTS_FILE.exists():
-        STUDENTS_FILE.write_text(DEFAULT_STUDENTS, encoding="utf-8")
+    #if not STUDENTS_FILE.exists():
+        #STUDENTS_FILE.write_text(DEFAULT_STUDENTS, encoding="utf-8")
 
     # data/email.html
     email_file = DATA_DIR / "email.html"
@@ -174,6 +174,19 @@ def _fetch_latest(token: str | None):
     if not inst_url:
         raise RuntimeError("Installer asset not found in latest release (check INSTALLER_PATTERN).")
     return tag, inst_url, sha_url
+
+def _promote_new_updater():
+    base = app_dir()
+    old = base / "updater_install.exe"
+    new = base / "updater_install_new.exe"
+    if new.exists():
+        if not old.exists():
+            try:
+                new.replace(old)  # renomeia para o nome canónico
+                return
+            except Exception:
+                pass
+        # se ambos existem, não mexe (evita conflito)
 
 def _maybe_update_silent():
     """
@@ -248,6 +261,7 @@ def _run_ui():
 if __name__ == "__main__":
     # 1) Garantir ficheiros mínimos por utilizador (evita int(None))
     _ensure_first_run_files()
+    _promote_new_updater()    
     # 2) Check updates (agora SEM depender de CHECKIN_SILENT_UPDATE)
     _maybe_update_silent()
     # 3) Arrancar UI
