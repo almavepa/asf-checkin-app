@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from logging.handlers import RotatingFileHandler
+from db import log_event, get_student_by_number, _connect
 
 # DB: agora usamos diretamente a BD para nome/emails e registos
 from db import log_event, get_student_by_number
@@ -117,11 +118,114 @@ def save_scan_cache():
         logger.error(f"Failed to write cache {CACHE_FILE}: {e}")
 
 def reset_unfinished_entries():
+    """
+    Arranque com diagnóstico + correção:
+      (A) UPDATE global: status='Saída' para quem não tem registos ou cujo último < hoje.
+      (B) INSERT (opcional via log_event): 'Saída' automática só para quem terminou < hoje em 'Entrada'.
+      (C) Verificação: inclui casos sem registos.
+      (D) Alinhar cache local.
+    """
+    try:
+        # Mostrar contexto
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT DATABASE() db, @@hostname host, NOW() now_db, CURDATE() curdate_db")
+            info = cur.fetchone() or {}
+            #print(f"[reset] DB={info.get('db')} host={info.get('host')} NOW={info.get('now_db')} CURDATE={info.get('curdate_db')}")
+
+        # (A) Corrigir status global (apanha também quem NÃO tem registos)
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute("""
+                UPDATE students s
+                LEFT JOIN (
+                  SELECT c1.student_id, MAX(c1.timestamp) AS last_ts
+                  FROM checkins c1
+                  GROUP BY c1.student_id
+                ) m ON m.student_id = s.id
+                SET s.status = 'Saída'
+                WHERE m.last_ts IS NULL OR DATE(m.last_ts) < CURDATE();
+            """)
+            #print(f"[reset] UPDATE status concluído (linhas tocadas: {cur.rowcount or 0})")
+
+        # (B) Inserir 'Saída' automática no histórico APENAS para quem ficou em Entrada ontem/antes
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT s.student_number, s.name, last.timestamp AS last_ts
+                FROM students s
+                JOIN (
+                  SELECT c1.student_id, c1.action, c1.timestamp
+                  FROM checkins c1
+                  JOIN (
+                    SELECT student_id, MAX(timestamp) AS last_ts
+                    FROM checkins
+                    GROUP BY student_id
+                  ) m ON m.student_id = c1.student_id AND m.last_ts = c1.timestamp
+                ) last ON last.student_id = s.id
+                WHERE last.action='Entrada' AND DATE(last.timestamp) < CURDATE()
+            """)
+            candidates = cur.fetchall() or []
+            #print(f"[reset] candidatos a 'Saída' automática (último=Entrada < hoje): {len(candidates)}")
+            for r in candidates[:8]:
+                print(f"  - {r['student_number']} {r['name']} (último={r['last_ts']})")
+
+        ok = fail = 0
+        for r in candidates:
+            try:
+                log_event(int(r["student_number"]), "Saída")  # escreve em checkins e atualiza students.status
+                ok += 1
+            except Exception as e:
+                print(f"[reset] ERRO log_event({r['student_number']}): {e}")
+                fail += 1
+        #print(f"[reset] auto-saídas inseridas: OK={ok} FAIL={fail}")
+
+        # (C) Verificação — agora inclui quem NÃO tem registos
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(*) AS n
+                FROM students s
+                LEFT JOIN (
+                  SELECT c1.student_id, MAX(c1.timestamp) AS last_ts
+                  FROM checkins c1
+                  GROUP BY c1.student_id
+                ) m ON m.student_id = s.id
+                WHERE s.status='Entrada' AND (m.last_ts IS NULL OR DATE(m.last_ts) < CURDATE());
+            """)
+            leftover = (cur.fetchone() or {}).get("n", 0)
+            #print(f"[reset] ainda em 'Entrada' sem registo hoje (inclui sem-registos): {leftover}")
+
+            if leftover:
+                cur.execute("""
+                    SELECT s.student_number, s.name, m.last_ts
+                    FROM students s
+                    LEFT JOIN (
+                      SELECT c1.student_id, MAX(c1.timestamp) AS last_ts
+                      FROM checkins c1
+                      GROUP BY c1.student_id
+                    ) m ON m.student_id = s.id
+                    WHERE s.status='Entrada' AND (m.last_ts IS NULL OR DATE(m.last_ts) < CURDATE())
+                    ORDER BY m.last_ts DESC NULLS LAST
+                    LIMIT 10;
+                """)
+                for x in (cur.fetchall() or []):
+                    print(f"    » {x['student_number']} {x['name']}  last_ts={x['last_ts']}")
+
+    except Exception as e:
+        print(f"[reset] ERRO: {e}")
+
+    # (D) Cache local — para não alternar mal no 1.º scan
     today = datetime.now().date()
     for sid, info in list(last_scan_times.items()):
-        if info["last_scan"].date() < today and info["last_tipo"] == "Entrada":
-            last_scan_times[sid]["last_tipo"] = "Saída"
-            logger.info(f"Forcing 'Saída' in memory for {sid} from previous day.")
+        try:
+            if info["last_scan"].date() < today and info["last_tipo"] == "Entrada":
+                last_scan_times[sid]["last_tipo"] = "Saída"
+        except Exception:
+            pass
+    try:
+        save_scan_cache()
+    except Exception:
+        pass
+
+
+
 
 # ---------------- local CSV mirror ----------------
 def _ensure_day_csv(ts: datetime) -> str:

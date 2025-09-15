@@ -249,6 +249,13 @@ if __name__ == "__main__":
     # 1) Garantir ficheiros mínimos por utilizador (evita int(None))
     _ensure_first_run_files()
     # 2) Check updates (agora SEM depender de CHECKIN_SILENT_UPDATE)
+    
     _maybe_update_silent()
+    try:
+        import keep_awake
+        keep_awake.start()
+    except Exception as e:
+        print("KeepAwake falhou:", e)
+
     # 3) Arrancar UI
     _run_ui()
