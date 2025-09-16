@@ -417,14 +417,21 @@ def log_checkin(student_id):
     cooldown = MIN_COOLDOWN
     tipo = "Entrada"
 
-    # toggle entrada/saída based on last scan
-    if student_id in last_scan_times:
-        prev = last_scan_times[student_id]
-        secs = (ts - prev["last_scan"]).total_seconds()
-        if secs < cooldown:
-            logger.debug(f"Ignored; last scan {int(secs)}s ago.")
-            return
-        tipo = "Saída" if prev["last_tipo"] == "Entrada" else "Entrada"
+     # toggle entrada/saída baseado no último registo na BD
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT action FROM checkins c "
+                "JOIN students s ON s.id=c.student_id "
+                "WHERE s.student_number=%s "
+                "ORDER BY c.timestamp DESC LIMIT 1",
+                (int(''.join(ch for ch in str(student_id) if ch.isdigit())),)
+            )
+            r = cur.fetchone()
+            if r and r.get("action") in ("Entrada", "Saída"):
+                tipo = "Saída" if r["action"] == "Entrada" else "Entrada"
+    except Exception as e:
+        logger.warning(f"Falha a obter último registo pela BD: {e}")
 
     # Extrair número para a BD
     digits = "".join(ch for ch in str(student_id) if ch.isdigit())
