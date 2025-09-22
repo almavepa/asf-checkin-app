@@ -315,6 +315,9 @@ class CheckinApp:
 
         # -------- Data ----------
         #self.students = load_students_from_file(self.STUDENTS_FILE)
+        self.students = {}              
+        self.load_students_from_db()    # preencher já da BD
+        
         self.registo_path = os.path.join(self.REGISTOS_DIR, f"registo_{date.today()}.csv")
         if not os.path.exists(self.registo_path):
             df = pd.DataFrame(columns=["ID", "Nome", "Data", "Hora", "Ação"])
@@ -327,8 +330,7 @@ class CheckinApp:
         
         self.tm = ToastManager(self.root)   # gestor de toasts leve/rápido
       
-
-        
+    
         
         
         # VERSION IN TITLE  -----------------------------------------------------------
@@ -357,7 +359,17 @@ class CheckinApp:
         # Só arranca o leitor ~1.5s depois para não "competir" com a janela de update
         self.root.after(1500, lambda: threading.Thread(target=self._iniciar_leitor_serial, daemon=True).start())
 
-       
+    def load_students_from_db(self):
+        try:
+            rows = fetch_all_students(limit=5000)   # vem do db.py
+            # dicionário: "student_number" (str) -> dict completo
+            self.students = {str(r["student_number"]): r for r in rows}
+        except Exception as e:
+            # loga e mantém vazio (para veres se falhou a ligação à BD)
+            import logging
+            logging.getLogger(__name__).exception("Falha ao carregar alunos da BD")
+            self.students = {}
+
        
     # --- ADICIONAR dentro da classe CheckinApp ---
 
@@ -368,7 +380,7 @@ class CheckinApp:
             # lê do .env (já foi carregado em __init__)
             host = os.getenv("DB_HOST", "127.0.0.1")
             port = int(os.getenv("DB_PORT", "3306") or "3306")
-            user = os.getenv("DB_USER", "checkin_db")
+            user = os.getenv("DB_USER", "checkin_user")
             pwd  = os.getenv("DB_PASSWORD", "checkin_pass")
             db   = os.getenv("DB_NAME", "checkin_db")
             conn = pymysql.connect(host=host, port=port, user=user, password=pwd, database=db,
@@ -1099,17 +1111,7 @@ class CheckinApp:
 
     # ---------------------- Students persistence ----------------------
     def _guardar_students(self):
-        # normalize to [nome, email1, email2]
-        data = {}
-        for sid, dados in self.students.items():
-            nome   = (dados[0] if len(dados) > 0 else "").strip()
-            email1 = (dados[1] if len(dados) > 1 else "").strip()
-            email2 = (dados[2] if len(dados) > 2 else "").strip()
-            data[sid] = [nome, email1, email2]
-        with open(self.STUDENTS_FILE, "w", encoding="utf-8") as f:
-            f.write("students = ")
-            json.dump(data, f, ensure_ascii=False, indent=4)
-            f.write("\n")
+        pass
 
     
 
@@ -1132,21 +1134,32 @@ class CheckinApp:
                 return
 
             # Duplicates per your logic
+# Ver duplicados (compatível BD e legacy)
+# Ver duplicados (compatível BD e legacy)
             name_l  = nome.lower()
-            email_l = email1.lower()
+            email_l = (email1 or "").lower()
+
             for _, dados in self.students.items():
-                n = (dados[0] if len(dados) > 0 else "").strip().lower()
-                e = (dados[1] if len(dados) > 1 else "").strip().lower()
+                if isinstance(dados, dict):
+                    n = (dados.get("name") or "").strip().lower()
+                    e = (dados.get("email1") or "").strip().lower()
+                else:
+                    # legado: [nome, email1, email2]
+                    n = ((dados[0] if len(dados) > 0 else "") or "").strip().lower()
+                    e = ((dados[1] if len(dados) > 1 else "") or "").strip().lower()
+
                 if email1:
                     if n == name_l and e == email_l:
                         messagebox.showerror("Duplicado",
-                                             f"O aluno '{nome}' com o email '{email1}' já existe.")
+                                            f"O aluno '{nome}' com o email '{email1}' já existe.")
                         return
                 else:
                     if n == name_l and not e:
                         messagebox.showerror("Duplicado",
-                                             f"Já existe um aluno chamado '{nome}' sem email principal.")
+                                            f"Já existe um aluno chamado '{nome}' sem email principal.")
                         return
+
+
 
             novo_id = str(max(int(k) for k in self.students.keys()) + 1) if self.students else "1001"
 
@@ -1168,10 +1181,11 @@ class CheckinApp:
                     email2=email2 or None,
                     qr_png=None,  # vamos enviar já a seguir
                 )
+                self.load_students_from_db()
                 # 2) guardar BLOB do QR (se a coluna qr_code existir)
                 try:
                     with open(caminho_qr, "rb") as f:
-                        save_qr_image(int(novo_id), f.read())
+                        self.load_students_from_db()
                 except FileNotFoundError:
                     pass
             except Exception as e:
