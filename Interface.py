@@ -1134,8 +1134,7 @@ class CheckinApp:
                 return
 
             # Duplicates per your logic
-# Ver duplicados (compatível BD e legacy)
-# Ver duplicados (compatível BD e legacy)
+
             name_l  = nome.lower()
             email_l = (email1 or "").lower()
 
@@ -1172,6 +1171,14 @@ class CheckinApp:
                 return
             
             # --- NOVO: gravar na BD (aluno + QR em BLOB) -------------------------
+            
+            # ler bytes do PNG
+            qr_bytes = None
+            try:
+                with open(caminho_qr, "rb") as f:
+                    qr_bytes = f.read()
+            except FileNotFoundError:
+                pass
             try:
                 # 1) cria/atualiza aluno (texto)
                 upsert_student(
@@ -1179,13 +1186,14 @@ class CheckinApp:
                     name=nome,
                     email1=email1 or None,
                     email2=email2 or None,
-                    qr_png=None,  # vamos enviar já a seguir
+                    qr_png=qr_bytes,  # vamos enviar já a seguir
                 )
                 self.load_students_from_db()
                 # 2) guardar BLOB do QR (se a coluna qr_code existir)
                 try:
                     with open(caminho_qr, "rb") as f:
                         self.load_students_from_db()
+                        
                 except FileNotFoundError:
                     pass
             except Exception as e:
