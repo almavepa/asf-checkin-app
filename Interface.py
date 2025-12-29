@@ -32,6 +32,8 @@ from worker import enqueue, init as worker_init
 from email.mime.text import MIMEText
 from email.utils import formataddr
 from db import get_student_by_number
+import notifier, sys, atexit
+
 
 from version import __version__                     # <-- VERSION IN TITLE
 from paths import get_paths, ensure_file
@@ -49,6 +51,7 @@ _APP_DIR_HINT, _ = _get_paths_hint()
 if _APP_DIR_HINT not in sys.path:
     sys.path.insert(0, _APP_DIR_HINT)
 
+SCANNER_VIDPID = "VID:PID=1A86:7523"
 
 # BD: listar registos de hoje (com fallback se BD não estiver disponível)
 try:
@@ -78,7 +81,21 @@ except Exception as e:
     def delete_student(*a, **k): raise RuntimeError(f"DB not available: {e}")  # type: ignore
 
 
+def find_scanner_port(preferred=None):
+    ports = list(serial.tools.list_ports.comports())
 
+    # 1) Se a porta do .env ainda existir, usa-a
+    if preferred:
+        for p in ports:
+            if p.device == preferred:
+                return p.device
+
+    # 2) Procurar pelo VID:PID do scanner
+    for p in ports:
+        if p.hwid and SCANNER_VIDPID in p.hwid:
+            return p.device
+
+    return None
 
 
 
@@ -296,6 +313,7 @@ class UpdateDialog(tk.Toplevel):
 class CheckinApp:
     def __init__(self):
         # -------- Paths / working dir ----------
+        self._last_scanner_alert = 0
         self.APP_DIR, self.DATA_DIR = get_paths()
         os.makedirs(self.DATA_DIR, exist_ok=True)
         os.chdir(self.DATA_DIR)  # all relative files go to DATA_DIR
@@ -351,6 +369,7 @@ class CheckinApp:
         load_scan_cache()
         reset_unfinished_entries()
         flush_pending_rows()
+        
 
         # -------- Check for updates (UI + progress) ----------
         self.root.after(200, self._check_updates_on_start)
@@ -997,6 +1016,7 @@ class CheckinApp:
         m_tools = tk.Menu(menubar, tearoff=0)
         m_tools.add_command(label="Base de dados…", command=self._tools_db)
         m_tools.add_command(label="Configuração de email…", command=self._tools_email)
+        m_tools.add_command(label="Scanner (COM)…", command=self._tools_scanner)
         menubar.add_cascade(label="Ferramentas", menu=m_tools)
 
         m_sys = tk.Menu(menubar, tearoff=0)
@@ -1004,9 +1024,75 @@ class CheckinApp:
         m_sys.add_separator()
         m_sys.add_command(label="Sair", command=self.root.destroy)
         menubar.add_cascade(label="Sistema", menu=m_sys)
+        
+        
 
         self.root.config(menu=menubar)
+        
+    def _tools_scanner(self):
+        import serial.tools.list_ports
 
+        env = self._read_env_dict()
+
+        win = tk.Toplevel(self.root)
+        win.title("Ferramentas • Scanner (COM)")
+        win.transient(self.root); win.grab_set()
+
+        pad = {"padx": 10, "pady": 6}
+        frm = tk.Frame(win); frm.pack(fill="both", expand=True, **pad)
+
+        ports = [p.device for p in serial.tools.list_ports.comports()]
+
+        v_port = tk.StringVar(value=env.get("SCANNER_PORT", ports[0] if ports else ""))
+        v_baud = tk.StringVar(value=env.get("SCANNER_BAUD", "9600"))
+
+        tk.Label(frm, text="Porta COM:", font=("Arial", 11)).grid(row=0, column=0, sticky="e", **pad)
+        cb = ttk.Combobox(frm, textvariable=v_port, values=ports, width=30)
+        cb.grid(row=0, column=1, sticky="w", **pad)
+
+        tk.Label(frm, text="Baudrate:", font=("Arial", 11)).grid(row=1, column=0, sticky="e", **pad)
+        ttk.Combobox(
+            frm,
+            textvariable=v_baud,
+            values=["9600", "19200", "115200"],
+            width=30
+        ).grid(row=1, column=1, sticky="w", **pad)
+
+        def refresh():
+            ps = [p.device for p in serial.tools.list_ports.comports()]
+            cb["values"] = ps
+            if ps:
+                v_port.set(ps[0])
+
+        def test():
+            try:
+                import serial
+                s = serial.Serial(v_port.get(), int(v_baud.get()), timeout=1)
+                s.close()
+                messagebox.showinfo("Scanner", "Scanner disponível nesta porta.")
+            except Exception as e:
+                messagebox.showerror("Scanner", f"Falha ao abrir a porta:\n{e}")
+
+        def save():
+            self._write_env_keys({
+                "SCANNER_PORT": v_port.get(),
+                "SCANNER_BAUD": v_baud.get(),
+            })
+            messagebox.showinfo("Scanner", "Configuração guardada no .env")
+
+        bar = tk.Frame(win); bar.pack(fill="x", pady=(6, 0))
+        tk.Button(bar, text="🔄 Atualizar portas", command=refresh).pack(side="left", padx=8)
+        tk.Button(bar, text="🧪 Testar", command=test).pack(side="left")
+        tk.Button(bar, text="Guardar", command=save).pack(side="right", padx=8)
+        tk.Button(bar, text="Fechar", command=win.destroy).pack(side="right")
+
+        win.update_idletasks()
+        x = self.root.winfo_rootx() + 60
+        y = self.root.winfo_rooty() + 60
+        win.geometry(f"+{x}+{y}")
+
+    
+    
     def _wire_events(self):
         self.root.bind("<Escape>", lambda e: self.registo_frame.place_forget())
 
@@ -1340,48 +1426,115 @@ class CheckinApp:
             print(f"  - {p.device}: {p.description}")
 
     def _iniciar_leitor_serial(self):
-        port = os.getenv("SCANNER_PORT", "COM3")
         baud = int(os.getenv("SCANNER_BAUD", "9600"))
+        REOPEN_INTERVAL = 600  # 10 minutos
 
         while True:
+            preferred = os.getenv("SCANNER_PORT")
+            port = find_scanner_port(preferred)
+
+            if not port:
+                self.root.after(
+                    0,
+                    lambda: self._show_last_read("Scanner não encontrado", success=False)
+                )
+                time.sleep(3)
+                continue
+
+            if port != preferred:
+                print(f"[i] Scanner mudou de {preferred} para {port}")
+                self._write_env_keys({"SCANNER_PORT": port})
+            
+            ser = None
+
             try:
-                self.root.after(0, lambda: self._show_last_read("Connecting scanner…", success=False))
                 print(f"[i] Opening serial {port} @ {baud}")
                 ser = serial.Serial(port=port, baudrate=baud, timeout=0.2)
-                self.root.after(0, lambda: self._show_last_read("Scanner pronto", success=True))
+                opened_at = time.monotonic()
+                notifier.notify_scanner_recovered(port)
+
+
+                self.root.after(
+                    0,
+                    lambda p=port: self._show_last_read(f"Scanner pronto ({p})", success=True)
+                )
+                notifier.mark_scanner_ok()
             except Exception as e:
                 print(f"[ERRO] Could not open {port}: {e}")
-                print("[i] Available ports:"); self._list_serial_ports()
-                time.sleep(3); continue
+                notifier.notify_scanner_error(f"Open failed on {port}: {e}")
+                time.sleep(3)
+                continue
 
             buffer = ""
             try:
                 while True:
+                    # 🔁 REOPEN PREVENTIVO DE 10 EM 10 MIN
+                    if time.monotonic() - opened_at > REOPEN_INTERVAL:
+                        print("[watchdog] Reabrir scanner (manutenção preventiva)")
+                        notifier.notify_scanner_reopen()
+                        try:
+                            ser.close()
+                        except Exception:
+                            pass
+
+                        time.sleep(0.5)   # 👈 AJUSTE 2 (fundamental)
+                        break             # sai para re-detectar COM
+
                     chunk = ser.read(ser.in_waiting or 1)
+
                     if not chunk:
+                        time.sleep(0.05)
                         continue
+
+                    notifier.mark_scanner_ok()
                     buffer += chunk.decode("utf-8", errors="ignore")
 
                     while True:
-                        idx_r = buffer.find("\r"); idx_n = buffer.find("\n")
-                        idx = min(i for i in (idx_r, idx_n) if i != -1) if (idx_r != -1 or idx_n != -1) else -1
+                        idx_r = buffer.find("\r")
+                        idx_n = buffer.find("\n")
+                        idx = min(i for i in (idx_r, idx_n) if i != -1) \
+                            if (idx_r != -1 or idx_n != -1) else -1
                         if idx == -1:
                             break
+
                         line, buffer = buffer[:idx], buffer[idx+1:]
                         code = line.strip()
-                        if not code:
-                            continue
+                        if code:
+                            self.root.after(0, lambda s=code: self._registar(s))
 
-                        def handle(s=code):
-                            self._registar(s)
-
-                        self.root.after(0, handle)
             except Exception as e:
                 print(f"[ERRO] Serial read error: {e}")
-                try: ser.close()
-                except: pass
-                self.root.after(0, lambda: self._show_last_read("Scanner disconnected – retrying…", success=False))
+                notifier.notify_scanner_error(str(e))
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+
+                now = time.monotonic()
+                if now - self._last_scanner_alert > 60:  # 1 minuto de cooldown
+                    self._last_scanner_alert = now
+                    self.root.after(
+                        0,
+                        lambda: self.tm.warn(
+                            "Scanner desligado",
+                            "Ligação ao leitor perdida.\n"
+                            "A tentar reconectar automaticamente…\n\n"
+                            "Se persistir, verifique o cabo ou a porta USB."
+                        )
+                    )
+
+                self.root.after(
+                    0,
+                    lambda: self._show_last_read(
+                        "Scanner disconnected – retrying…",
+                        success=False
+                    )
+                )
+
                 time.sleep(2)
+
+
+
 
     # ---------------------- Public API ----------------------
     def run(self):
@@ -1391,5 +1544,19 @@ class CheckinApp:
 # Entrypoint
 # --------------------------------------------------------------------------------------
 if __name__ == "__main__":
+  
+    # startup
+    notifier.notify_startup()
+
+    # shutdown
+    atexit.register(notifier.notify_shutdown)
+
+    # erros críticos
+    sys.excepthook = notifier.notify_error
+
+    # scanner watchdog
+    notifier.start_scanner_watchdog()
+    
     app = CheckinApp()
     app.run()
+    

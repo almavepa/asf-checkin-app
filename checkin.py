@@ -14,6 +14,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from logging.handlers import RotatingFileHandler
 from db import log_event, get_student_by_number, _connect
 
+
 # DB: agora usamos diretamente a BD para nome/emails e registos
 from db import log_event, get_student_by_number
 
@@ -54,6 +55,7 @@ ensure_file(ENV_FILE, "SMTP_SERVER=\nSMTP_PORT=465\nSMTP_USER=\nSMTP_PASS=\nSCAN
 
 # ---------------- logging ----------------
 logger = logging.getLogger("app")
+
 if not logger.handlers:
     logger.setLevel(logging.INFO)
     _h = RotatingFileHandler(os.path.join(LOG_DIR, "app.log"), maxBytes=500_000, backupCount=3, encoding="utf-8")
