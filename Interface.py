@@ -35,6 +35,7 @@ from db import get_student_by_number
 import notifier, sys, atexit
 
 
+
 from version import __version__                     # <-- VERSION IN TITLE
 from paths import get_paths, ensure_file
 from generate_qr import gerar_qr_para_id, enviar_qr_por_email
@@ -367,8 +368,18 @@ class CheckinApp:
 
         # -------- Startup housekeeping ----------
         load_scan_cache()
-        reset_unfinished_entries()
-        flush_pending_rows()
+        try:
+            reset_unfinished_entries()
+        except Exception as e:
+            print("[BD] reset_unfinished_entries falhou:", e)
+            self._show_last_read("BD offline (reset pendente)", success=False)
+
+        try:
+            flush_pending_rows()
+        except Exception as e:
+            print("[BD] flush_pending_rows falhou:", e)
+            self._show_last_read("BD offline (pendentes por enviar)", success=False)
+
         
 
         # -------- Check for updates (UI + progress) ----------
@@ -388,6 +399,9 @@ class CheckinApp:
             import logging
             logging.getLogger(__name__).exception("Falha ao carregar alunos da BD")
             self.students = {}
+            if hasattr(self, "root"):
+                self.root.after(0, lambda: self._show_last_read("BD offline (alunos não carregados)", success=False))
+
 
        
     # --- ADICIONAR dentro da classe CheckinApp ---
@@ -1120,10 +1134,12 @@ class CheckinApp:
     def _atualizar_lista(self):
         try:
             linhas = []
-
+            rows = []
+            db_ok = True
             # 1) Tenta ir à BD (mais fiável)
             try:
-                rows = fetch_today_checkins()  # [{timestamp, name, student_number, action, device_name}, ...]
+                #rows = fetch_today_checkins()  # [{timestamp, name, student_number, action, device_name}, ...]
+                rows = fetch_today_checkins(self._registos_date if hasattr(self, "_registos_date") else None)
                 if rows:
                     # Ordenar por timestamp desc (por segurança)
                     rows.sort(key=lambda r: r.get("timestamp"), reverse=True)
@@ -1136,9 +1152,13 @@ class CheckinApp:
                             hora = str(ts)[11:19]
                         nome = r.get("name") or ""
                         num  = r.get("student_number")
-                        acc  = r.get("action") or r.get("acao") or r.get("Ação") or ""
-                        linhas.append(f"{hora} - {nome} ({num}) - {acc}")
+                        acc = r.get("action") or r.get("acao") or r.get("Ação") or ""
+                        dev = r.get("device_name") or r.get("machine") or ""
+
+                        suffix = f" [{dev}]" if dev else ""
+                        linhas.append(f"{hora} - {nome} ({num}) - {acc}{suffix}")
             except Exception as e:
+                db_ok = False
                 # Se a BD falhar, continuamos para o CSV
                 pass
 

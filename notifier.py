@@ -2,6 +2,8 @@
 import os, sys, time, threading, smtplib, ssl
 from email.message import EmailMessage
 from dotenv import load_dotenv
+import tkinter as tk
+from tkinter import messagebox
 
 load_dotenv(os.path.join(os.path.expanduser("~"), "Documents", "CheckinApp", ".env"))
 
@@ -56,6 +58,19 @@ def _scanner_watchdog():
         if time.time() - _last_scanner_ok > 600:  # 10 min
             _send("Scanner offline", "O scanner está desconectado há mais de 10 minutos.")
             # evitar spam: só 1 email por período
+            try:
+                root = tk.Tk()
+                root.withdraw()
+                messagebox.showwarning(
+                    "Scanner sem leituras",
+                    "O scanner está ligado mas não envia leituras há mais de 10 minutos.\n\n"
+                    "Verifique o leitor ou a ligação USB."
+                )
+                root.destroy()
+            except Exception:
+                pass            
+            
+            
             _last_scanner_ok = time.time()
         time.sleep(60)
 

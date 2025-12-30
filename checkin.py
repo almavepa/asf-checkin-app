@@ -172,7 +172,7 @@ def reset_unfinished_entries():
         ok = fail = 0
         for r in candidates:
             try:
-                log_event(int(r["student_number"]), "Saída")  # escreve em checkins e atualiza students.status
+                log_event(int(r["student_number"]), "Saída", machine="Logout Automático")  # escreve em checkins e atualiza students.status
                 ok += 1
             except Exception as e:
                 print(f"[reset] ERRO log_event({r['student_number']}): {e}")
