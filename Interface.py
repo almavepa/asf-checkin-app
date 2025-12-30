@@ -1139,7 +1139,7 @@ class CheckinApp:
             # 1) Tenta ir à BD (mais fiável)
             try:
                 #rows = fetch_today_checkins()  # [{timestamp, name, student_number, action, device_name}, ...]
-                rows = fetch_today_checkins(self._registos_date if hasattr(self, "_registos_date") else None)
+                rows = fetch_today_checkins()
                 if rows:
                     # Ordenar por timestamp desc (por segurança)
                     rows.sort(key=lambda r: r.get("timestamp"), reverse=True)
