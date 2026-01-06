@@ -227,6 +227,51 @@ def reset_unfinished_entries():
         pass
 
 
+def rebuild_last_scan_times_from_db():
+    """
+    Reconstrói last_scan_times (memória) a partir do último registo
+    de cada aluno na base de dados.
+
+    Deve ser chamada UMA vez no arranque da app, depois do
+    reset_unfinished_entries().
+    """
+    global last_scan_times
+    last_scan_times = {}
+
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT s.student_number, c.action, c.timestamp
+                FROM checkins c
+                JOIN students s ON s.id = c.student_id
+                JOIN (
+                    SELECT student_id, MAX(timestamp) AS last_ts
+                    FROM checkins
+                    GROUP BY student_id
+                ) m ON m.student_id = c.student_id
+                   AND m.last_ts = c.timestamp
+            """)
+            rows = cur.fetchall() or []
+
+        for r in rows:
+            sid = str(r["student_number"])
+            last_scan_times[sid] = {
+                "last_scan": r["timestamp"],
+                "last_tipo": r["action"],
+            }
+
+        logger.info(f"[STATE] rebuild_last_scan_times_from_db: {len(last_scan_times)} aluno(s) sincronizados")
+
+        # opcional: persistir cache local já reconstruída
+        try:
+            save_scan_cache()
+        except Exception:
+            pass
+
+    except Exception as e:
+        logger.error(f"[STATE] Falha no rebuild_last_scan_times_from_db: {e}")
+
+
 
 
 # ---------------- local CSV mirror ----------------

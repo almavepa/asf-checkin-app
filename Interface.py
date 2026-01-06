@@ -1447,7 +1447,7 @@ class CheckinApp:
 
     def _iniciar_leitor_serial(self):
         baud = int(os.getenv("SCANNER_BAUD", "9600"))
-        REOPEN_INTERVAL = 600  # 10 minutos
+        #REOPEN_INTERVAL = 600  # 10 minutos
 
         while True:
             preferred = os.getenv("SCANNER_PORT")
@@ -1470,7 +1470,7 @@ class CheckinApp:
             try:
                 print(f"[i] Opening serial {port} @ {baud}")
                 ser = serial.Serial(port=port, baudrate=baud, timeout=0.2)
-                opened_at = time.monotonic()
+                #opened_at = time.monotonic()
                 notifier.notify_scanner_recovered(port)
 
 
