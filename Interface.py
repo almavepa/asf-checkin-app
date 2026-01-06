@@ -1488,18 +1488,7 @@ class CheckinApp:
             buffer = ""
             try:
                 while True:
-                    # 🔁 REOPEN PREVENTIVO DE 10 EM 10 MIN
-                    if time.monotonic() - opened_at > REOPEN_INTERVAL:
-                        print("[watchdog] Reabrir scanner (manutenção preventiva)")
-                        notifier.notify_scanner_reopen()
-                        try:
-                            ser.close()
-                        except Exception:
-                            pass
-
-                        time.sleep(0.5)   # 👈 AJUSTE 2 (fundamental)
-                        break             # sai para re-detectar COM
-
+                        
                     chunk = ser.read(ser.in_waiting or 1)
 
                     if not chunk:
