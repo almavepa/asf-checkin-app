@@ -373,6 +373,13 @@ class CheckinApp:
         except Exception as e:
             print("[BD] reset_unfinished_entries falhou:", e)
             self._show_last_read("BD offline (reset pendente)", success=False)
+            
+        # 🔑 AQUI: reconstruir estado em memória a partir da BD
+        try:
+            from checkin import rebuild_last_scan_times_from_db
+            rebuild_last_scan_times_from_db()
+        except Exception as e:
+            print("[BD] rebuild_last_scan_times_from_db falhou:", e)
 
         try:
             flush_pending_rows()
