@@ -13,6 +13,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from logging.handlers import RotatingFileHandler
 from db import log_event, get_student_by_number, _connect
+from zoneinfo import ZoneInfo
 
 
 # DB: agora usamos diretamente a BD para nome/emails e registos
@@ -172,7 +173,8 @@ def reset_unfinished_entries():
         ok = fail = 0
         for r in candidates:
             try:
-                log_event(int(r["student_number"]), "Saída", device_name="Logout Automático")  # escreve em checkins e atualiza students.status
+                ts = datetime.now(ZoneInfo("Europe/Lisbon")).replace(tzinfo=None)
+                log_event(int(r["student_number"]), "Saída", device_name="Logout Automático",ts=ts)  # escreve em checkins e atualiza students.status
                 ok += 1
             except Exception as e:
                 print(f"[reset] ERRO log_event({r['student_number']}): {e}")
@@ -214,7 +216,7 @@ def reset_unfinished_entries():
         print(f"[reset] ERRO: {e}")
 
     # (D) Cache local — para não alternar mal no 1.º scan
-    today = datetime.now().date()
+    today = datetime.now(ZoneInfo("Europe/Lisbon")).date()
     for sid, info in list(last_scan_times.items()):
         try:
             if info["last_scan"].date() < today and info["last_tipo"] == "Entrada":
@@ -460,7 +462,7 @@ def send_email_db(name: str, email1: str | None, email2: str | None,
 # ---------------- main check-in API ----------------
 def log_checkin(student_id):
     start = time.time()
-    ts = datetime.now()
+    ts = datetime.now(ZoneInfo("Europe/Lisbon")).replace(tzinfo=None)
     cooldown = MIN_COOLDOWN
     tipo = "Entrada"
 
@@ -504,7 +506,7 @@ def log_checkin(student_id):
 
     # 1) MariaDB primeiro (fonte principal)
     try:
-        log_event(sid_num, tipo, DEVICE_NAME)
+        log_event(sid_num, tipo, DEVICE_NAME,ts)
     except Exception as e:
         # não quebrar — Sheets é backup, mas sem DB não há registo "oficial"
         logger.warning(f"DB write skipped/failure: {e}")

@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Optional
 import pymysql
 from dotenv import load_dotenv
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+
 
 
 def _get_data_dir() -> Path:
@@ -127,52 +131,56 @@ def get_student_by_number(student_number: int) -> dict | None:
         except Exception:
             pass
         row = cur.fetchone()
-        print("Resultado:", row)
+        #print("Resultado:", row)
         return row
 
 
 # ---------- CHECKINS ----------
-def log_event(student_number: int, action: str, device_name: str | None = None) -> None:
-    """
-    Escreve no histórico (checkins) e atualiza o 'status' em students se a coluna existir.
-    checkins columns: id, student_id (FK students.id), timestamp (DATETIME), action (ENUM), device_name (opcional)
-    """
+def log_event(student_number: int, action: str, device_name: str | None = None, ts=None) -> None:
+    if ts is None:
+        ts = datetime.now(ZoneInfo("Europe/Lisbon")).replace(tzinfo=None)
+
     with _connect() as conn, conn.cursor() as cur:
-        # obter students.id — sem criar automaticamente
+        #print("STEP 1", student_number)
         cur.execute("SELECT id FROM students WHERE student_number=%s", (student_number,))
+
         r = cur.fetchone()
         if r is None:
             raise ValueError(f"Aluno {student_number} não existe na BD")
 
         sid = int(r["id"])
 
-        # inserir em checkins
-        # saber se device_name existe
+        #print("STEP 2", DB_NAME)
         cur.execute(
             "SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS "
             "WHERE TABLE_SCHEMA=%s AND TABLE_NAME='checkins' AND COLUMN_NAME='device_name'",
             (DB_NAME,)
         )
         has_device = (cur.fetchone() or {}).get("c", 0) > 0
+        #print("has_device =", has_device)
 
         if has_device:
+            #print("STEP 3A", (sid, ts, action, device_name or DEVICE))
             cur.execute(
-                "INSERT INTO checkins (student_id, timestamp, action, device_name) VALUES (%s, NOW(), %s, %s)",
-                (sid, action, device_name or DEVICE)
+                "INSERT INTO checkins (student_id, timestamp, action, device_name) VALUES (%s, %s, %s, %s)",
+                (sid, ts, action, device_name or DEVICE)
             )
         else:
+            #print("STEP 3B", (sid, ts, action))
             cur.execute(
-                "INSERT INTO checkins (student_id, timestamp, action) VALUES (%s, NOW(), %s)",
-                (sid, action)
+                "INSERT INTO checkins (student_id, timestamp, action) VALUES (%s, %s, %s)",
+                (sid, ts, action)
             )
 
-        # atualizar estado em students (se existir)
+        #print("STEP 4", DB_NAME)
         cur.execute(
             "SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS "
             "WHERE TABLE_SCHEMA=%s AND TABLE_NAME='students' AND COLUMN_NAME='status'",
             (DB_NAME,)
         )
+
         if (cur.fetchone() or {}).get("c", 0) > 0:
+            #print("STEP 5", (action, sid))
             cur.execute("UPDATE students SET status=%s WHERE id=%s", (action, sid))
 
 # ---------- LISTAGEM (REGISTOS DE HOJE) ----------
