@@ -1,2 +1,2 @@
 # version.py
-__version__ = "1.1.29"
+__version__ = "1.1.30"

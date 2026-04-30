@@ -274,7 +274,7 @@ def fetch_all_students(query: str | None = None, limit: int = 1000, offset: int 
         else:                select_fields.append("NULL AS email1")
         if "email2" in cols: select_fields.append("email2")
         else:                select_fields.append("NULL AS email2")
-        sql = f"SELECT {', '.join(select_fields)} FROM students"
+        sql = f"SELECT {', '.join(select_fields)} FROM students WHERE active = 1"
         params = []
         if query:
             q = f"%{query}%"
@@ -283,7 +283,7 @@ def fetch_all_students(query: str | None = None, limit: int = 1000, offset: int 
             where.append("name LIKE %s")
             if "email1" in cols: where.append("email1 LIKE %s")
             if "email2" in cols: where.append("email2 LIKE %s")
-            sql += " WHERE " + " OR ".join(where)
+            sql += " AND (" + " OR ".join(where) + ")"
             params = [q, q]
             if "email1" in cols: params.append(q)
             if "email2" in cols: params.append(q)
@@ -332,12 +332,16 @@ def delete_student(student_number: int) -> int:
             return 0
         sid = int(row["id"])
         # tentar remover checkins (se não estiver em cascade, isto é necessário; se estiver, não faz mal)
-        try:
-            cur.execute("DELETE FROM checkins WHERE student_id=%s", (sid,))
-        except Exception:
-            pass
-        # remover o aluno
-        cur.execute("DELETE FROM students WHERE id=%s", (sid,))
+        cur.execute(
+            """
+            UPDATE students
+            SET active = 0,
+                deleted_at = NOW()
+            WHERE id = %s
+            """,
+            (sid,)
+        )
+
         return cur.rowcount
 
 # ---------- APAGAR REGISTO (checkin) ----------
